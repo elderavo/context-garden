@@ -1,0 +1,34 @@
+# Data directory — contains config.json with API keys and workspace state
+.context-garden/
+
+# Mirror output — generated at runtime, not source
+md_db/
+
+# Claude Code local settings
+.claude/
+
+# Dependencies and build output
+node_modules/
+dist/
+
+# Stale compiled JS alongside TS source
+bin/*.js
+bin/*.d.ts
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
