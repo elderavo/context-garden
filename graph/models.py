@@ -65,6 +65,9 @@ class RetrievedNote:
     tier: str = ""               # "1" | "2" | "3" | ""
     workspace: str = ""          # workspace name (empty for non-workspace notes)
     title: str = ""              # human-readable title from frontmatter/H1
+    # Graph path provenance (#4 — path annotation)
+    via_edge: str = ""           # edge label used to reach this note (e.g. "CALLS")
+    via_source_title: str = ""   # human title of the note that linked here
 
 
 # ---------------------------------------------------------------------------

@@ -254,6 +254,7 @@ class KnowledgeGraphEngine:
                 query=query,
                 workspace=workspace,
             )
+            # No query embedding available in keyword-only path — triple scoring skipped
 
         return {
             "seed_notes": [self._note_to_dict(n) for n in seed_notes],
@@ -806,4 +807,6 @@ class KnowledgeGraphEngine:
             "depth": note.depth,
             "workspace": note.workspace,
             "title": note.title,
+            "viaEdge": note.via_edge or None,
+            "viaSourceTitle": note.via_source_title or None,
         }

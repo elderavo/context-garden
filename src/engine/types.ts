@@ -57,6 +57,12 @@ export interface RetrievedNote {
 
   /** Human-readable title from frontmatter or H1, set by the Python engine at retrieval time. */
   title?: string;
+
+  /** Edge label that brought this note into the result set (graph-expanded notes only). */
+  viaEdge?: string;
+
+  /** Human title of the note that linked to this one via viaEdge. */
+  viaSourceTitle?: string;
 }
 
 // ---------------------------------------------------------------------------

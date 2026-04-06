@@ -453,6 +453,8 @@ interface RpcRetrievedNote {
   linkedFrom?: string[] | null;
   depth?: number | null;
   title?: string | null;
+  viaEdge?: string | null;
+  viaSourceTitle?: string | null;
 }
 
 function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
@@ -468,12 +470,28 @@ function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
     linkedFrom: n.linkedFrom ?? undefined,
     depth: n.depth ?? undefined,
     title: n.title ?? undefined,
+    viaEdge: n.viaEdge ?? undefined,
+    viaSourceTitle: n.viaSourceTitle ?? undefined,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Context formatting — tier-aware (unchanged from Phase 1)
+// Context formatting — tier-aware
 // ---------------------------------------------------------------------------
+
+const _EDGE_READABLE: Record<string, string> = {
+  CALLS: "calls",
+  CONTAINS_SYMBOL: "contains",
+  DEFINED_IN: "defined in",
+  CONTAINS: "contains file",
+  IMPORTS: "imports",
+  LINKS_TO: "links to",
+  BELONGS_TO: "belongs to",
+};
+
+function _edgeArrow(edgeLabel: string): string {
+  return `—[${_EDGE_READABLE[edgeLabel] ?? edgeLabel.toLowerCase()}]→`;
+}
 
 function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[]): string {
   const allNotes = [...seedNotes, ...expandedNotes];
@@ -502,6 +520,11 @@ function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[
     const seedMark = note.depth === 0 || note.retrievalSource === "vector" ? "*" : "";
     const meta = [seedMark, `score: ${note.score.toFixed(3)}`, extraMeta].filter(Boolean).join(" | ");
     lines.push(`### ${note.path}${labelSuffix} (${meta})`);
+    // #4 — path annotation: show which edge + source brought this note in
+    if (note.viaEdge && note.viaSourceTitle) {
+      const arrow = _edgeArrow(note.viaEdge);
+      lines.push(`_via: ${note.viaSourceTitle} ${arrow} ${note.viaEdge} ${arrow} here_`);
+    }
     lines.push(stripFrontmatter(note.content));
     lines.push("");
   };

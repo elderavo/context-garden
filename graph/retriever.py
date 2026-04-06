@@ -6,6 +6,22 @@ Replaces the TS hybrid-retrieval.ts:
   - Tier-aware score multipliers
   - Tag boosting + index note filtering
 
+Feature: Relational triple embedding (#2)
+─────────────────────────────────────────
+For each candidate hop, we build a short relational description:
+    "{source.title} {edge_phrase} {neighbor.title}"
+e.g. "ContextEngine calls resolvePythonPath"
+
+This string is batch-embedded and its cosine similarity to the query embedding
+is used as a re-ranking factor (±30% on the base score). The embed_model is
+optional — falls back to pure-multiplier scoring when unavailable.
+
+Feature: Path provenance tracking (#4)
+───────────────────────────────────────
+Every expanded note carries via_edge (edge label) and via_source_title (the
+source note's human title) so the TS formatting layer can annotate each note
+with the path that brought it into the result set.
+
 Symbol-centric graph model
 ──────────────────────────
 Classes and methods (tier-1 codeSymbol) are the primary interlinked core.
@@ -35,12 +51,12 @@ Generic (non-code notes):
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from llama_index.core import VectorStoreIndex
 from llama_index.core.graph_stores import SimplePropertyGraphStore
-from llama_index.embeddings.ollama import OllamaEmbedding
 
 from .markdown_utils import normalize_token
 from .models import ParsedNote, RetrievedNote
@@ -55,29 +71,41 @@ class WorkspaceScopeViolationError(RuntimeError):
 # Constants
 # ---------------------------------------------------------------------------
 
-TAG_BOOST_PER_TAG = 0.10   # +10% per matching tag
-TAG_BOOST_MAX = 0.30       # cap at +30%
+TAG_BOOST_PER_TAG = 0.10
+TAG_BOOST_MAX = 0.30
 
-# Score multipliers for each edge type — symbol-centric weighting
 _EDGE_MULTIPLIER: dict[str, float] = {
-    "CALLS": 0.80,              # sideways: symbol → symbol (primary axis)
-    "CONTAINS_SYMBOL": 0.85,    # down: file → symbol
-    "DEFINED_IN": 0.70,         # up: symbol → file
-    "CONTAINS": 0.70,           # down: module → file
-    "IMPORTS": 0.60,            # sideways: file → file
-    "LINKS_TO": 0.50,           # generic non-code wikilink
-    "BELONGS_TO": 0.40,         # up: file → module (outer layer, low weight)
+    "CALLS": 0.80,
+    "CONTAINS_SYMBOL": 0.85,
+    "DEFINED_IN": 0.70,
+    "CONTAINS": 0.70,
+    "IMPORTS": 0.60,
+    "LINKS_TO": 0.50,
+    "BELONGS_TO": 0.40,
 }
 
-# Only follow downward edges when the seed has a strong enough score
+# Human-readable edge phrases for triple strings
+_EDGE_PHRASE: dict[str, str] = {
+    "CALLS": "calls",
+    "CONTAINS_SYMBOL": "contains",
+    "DEFINED_IN": "is defined in",
+    "CONTAINS": "contains file",
+    "IMPORTS": "imports",
+    "LINKS_TO": "links to",
+    "BELONGS_TO": "belongs to",
+}
+
 DOWN_SEED_THRESHOLD = 0.60
-
-# Only gate IMPORTS by query overlap; CALLS are followed unconditionally
-# (the whole point of graph traversal is finding things the user didn't name)
 SIDEWAYS_REQUIRE_QUERY_OVERLAP_IMPORTS = True
-
-# Maximum depth for CALLS-chain expansion (depth-1 always; depth-2 for CALLS only)
 MAX_CALLS_DEPTH = 2
+
+# Triple embedding scoring parameters
+# triple_factor = clamp(TRIPLE_CENTER + triple_sim * TRIPLE_SCALE, TRIPLE_MIN, TRIPLE_MAX)
+# At triple_sim=0.5 → factor≈1.0 (neutral); range [0.6, 1.4]
+TRIPLE_CENTER = 0.50
+TRIPLE_SCALE = 1.00
+TRIPLE_MIN = 0.60
+TRIPLE_MAX = 1.40
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +114,6 @@ MAX_CALLS_DEPTH = 2
 
 
 def _name_tokens(note: ParsedNote) -> set[str]:
-    """Normalized tokens from a note's title and path stem."""
     stem = Path(note.path).stem
     tokens: set[str] = set()
     for word in (note.title + " " + stem).split():
@@ -97,12 +124,10 @@ def _name_tokens(note: ParsedNote) -> set[str]:
 
 
 def _overlaps_query(note: ParsedNote, query_tokens: set[str]) -> bool:
-    """True if any name token appears in the query."""
     return bool(_name_tokens(note) & query_tokens)
 
 
 def _apply_tag_boost(score: float, note_tags: list[str], query_tokens: set[str]) -> float:
-    """Boost score by +10% per matching tag, capped at +30%."""
     if not note_tags or not query_tokens:
         return score
     matching = sum(1 for t in note_tags if t in query_tokens)
@@ -117,26 +142,73 @@ def _should_skip_edge(
     neighbor_parsed: ParsedNote,
     query_tokens: set[str],
 ) -> bool:
-    """Return True if this expansion edge should be skipped."""
-    # Downward edges: only follow when seed is strong
     if edge_label in ("CONTAINS_SYMBOL", "CONTAINS"):
-        if not is_outgoing:
-            # Incoming CONTAINS_SYMBOL/CONTAINS means neighbor is the container
-            # — that's "going up", allow.
-            return False
-        if seed_score < DOWN_SEED_THRESHOLD:
+        if is_outgoing and seed_score < DOWN_SEED_THRESHOLD:
             return True
-
-    # CALLS edges: follow unconditionally (symbol-centric graph primary axis)
     if edge_label == "CALLS":
         return False
-
-    # IMPORTS edges: only follow when neighbor name overlaps query
     if edge_label == "IMPORTS" and SIDEWAYS_REQUIRE_QUERY_OVERLAP_IMPORTS:
         if not _overlaps_query(neighbor_parsed, query_tokens):
             return True
-
     return False
+
+
+# ---------------------------------------------------------------------------
+# Relational triple embedding (#2)
+# ---------------------------------------------------------------------------
+
+
+def _build_triple_string(
+    source_title: str,
+    edge_label: str,
+    neighbor_title: str,
+    is_outgoing: bool,
+) -> str:
+    """Build a natural-language relational description for embedding.
+
+    Outgoing: "ContextEngine calls resolvePythonPath"
+    Incoming: "resolvePythonPath called by ContextEngine"  (flip for readability)
+    """
+    phrase = _EDGE_PHRASE.get(edge_label, edge_label.lower())
+    if is_outgoing:
+        return f"{source_title} {phrase} {neighbor_title}"
+    else:
+        return f"{neighbor_title} {phrase} {source_title}"
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two embedding vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a < 1e-10 or norm_b < 1e-10:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _triple_factor(triple_sim: float) -> float:
+    """Convert a cosine similarity to a score multiplier in [TRIPLE_MIN, TRIPLE_MAX]."""
+    raw = TRIPLE_CENTER + triple_sim * TRIPLE_SCALE
+    return max(TRIPLE_MIN, min(TRIPLE_MAX, raw))
+
+
+def _batch_score_triples(
+    query_embedding: list[float],
+    triple_strings: list[str],
+    embed_model: Any,
+) -> list[float]:
+    """Batch-embed triple strings and return per-triple cosine similarities."""
+    try:
+        triple_embeddings = embed_model.get_text_embeddings(triple_strings)
+        return [_cosine_sim(query_embedding, te) for te in triple_embeddings]
+    except Exception as exc:
+        log.warning("Triple embedding failed, using neutral scores: %s", exc)
+        return [0.5] * len(triple_strings)
+
+
+# ---------------------------------------------------------------------------
+# Core expansion
+# ---------------------------------------------------------------------------
 
 
 def _expand_one_hop(
@@ -149,19 +221,24 @@ def _expand_one_hop(
     workspace: str | None,
     depth: int,
     edge_filter: set[str] | None = None,
+    query_embedding: list[float] | None = None,
+    embed_model: Any | None = None,
 ) -> list[RetrievedNote]:
     """Expand a set of notes by one hop, returning new neighbors.
 
-    Args:
-        edge_filter: if set, only follow edges with these labels.
-                     None = follow all (subject to _should_skip_edge).
+    If query_embedding + embed_model are provided, scores each candidate hop
+    by the cosine similarity of the relational triple embedding to the query
+    (feature #2). Also records via_edge + via_source_title on each result (feature #4).
     """
-    expanded: list[RetrievedNote] = []
-    expanded_ids: set[str] = set()
+    # ── Pass 1: collect raw candidates ────────────────────────────────────
+    candidates: list[tuple[str, str, float, ParsedNote, str, bool]] = []
+    # (source_id, source_title, source_score, neighbor_parsed, edge_label, is_outgoing)
+    seen_neighbors: set[str] = set()
 
     for source in source_notes:
         source_id = source.note_id
         source_score = source_scores.get(source_id, source.score)
+        source_title = source.title or Path(source_id).stem
 
         try:
             triplets = graph_store.get_triplets(entity_names=[source_id])
@@ -180,7 +257,7 @@ def _expand_one_hop(
             is_outgoing = source_name == source_id
             neighbor_id = target_name if is_outgoing else source_name
 
-            if not neighbor_id or neighbor_id in exclude_ids or neighbor_id in expanded_ids:
+            if not neighbor_id or neighbor_id in exclude_ids or neighbor_id in seen_neighbors:
                 continue
 
             neighbor_parsed = parsed_notes.get(neighbor_id)
@@ -199,28 +276,55 @@ def _expand_one_hop(
             ):
                 continue
 
-            multiplier = _EDGE_MULTIPLIER.get(edge_label, 0.50)
-            neighbor_score = source_score * multiplier
-            boosted = _apply_tag_boost(neighbor_score, neighbor_parsed.tags, query_tokens)
+            candidates.append((source_id, source_title, source_score, neighbor_parsed, edge_label, is_outgoing))
+            seen_neighbors.add(neighbor_id)
 
-            expanded.append(
-                RetrievedNote(
-                    note_id=neighbor_id,
-                    path=neighbor_id,
-                    content=neighbor_parsed.body,
-                    score=boosted,
-                    type=neighbor_parsed.note_type,  # type: ignore[arg-type]
-                    tool_id=neighbor_parsed.tool_id,
-                    tags=neighbor_parsed.tags,
-                    retrieval_source="graph",
-                    linked_from=[source_id],
-                    depth=depth,
-                    tier=neighbor_parsed.tier,
-                    workspace=neighbor_parsed.workspace,
-                    title=neighbor_parsed.title,
-                )
+    if not candidates:
+        return []
+
+    # ── Pass 2: triple embedding scoring (#2) ─────────────────────────────
+    if query_embedding is not None and embed_model is not None:
+        triple_strings = [
+            _build_triple_string(src_title, edge, nbr.title or Path(nbr.path).stem, outgoing)
+            for _, src_title, _, nbr, edge, outgoing in candidates
+        ]
+        triple_sims = _batch_score_triples(query_embedding, triple_strings, embed_model)
+        log.debug("Triple sims for %d candidates: min=%.3f max=%.3f avg=%.3f",
+                  len(triple_sims),
+                  min(triple_sims), max(triple_sims),
+                  sum(triple_sims) / len(triple_sims))
+    else:
+        triple_sims = [0.5] * len(candidates)
+
+    # ── Pass 3: build RetrievedNote results ───────────────────────────────
+    expanded: list[RetrievedNote] = []
+
+    for (source_id, source_title, source_score, neighbor_parsed, edge_label, is_outgoing), triple_sim in zip(candidates, triple_sims):
+        multiplier = _EDGE_MULTIPLIER.get(edge_label, 0.50)
+        base_score = source_score * multiplier
+        triple_f = _triple_factor(triple_sim)
+        neighbor_score = base_score * triple_f
+        boosted = _apply_tag_boost(neighbor_score, neighbor_parsed.tags, query_tokens)
+
+        expanded.append(
+            RetrievedNote(
+                note_id=neighbor_parsed.note_id,
+                path=neighbor_parsed.path,
+                content=neighbor_parsed.body,
+                score=boosted,
+                type=neighbor_parsed.note_type,  # type: ignore[arg-type]
+                tool_id=neighbor_parsed.tool_id,
+                tags=neighbor_parsed.tags,
+                retrieval_source="graph",
+                linked_from=[source_id],
+                depth=depth,
+                tier=neighbor_parsed.tier,
+                workspace=neighbor_parsed.workspace,
+                title=neighbor_parsed.title,
+                via_edge=edge_label,
+                via_source_title=source_title,
             )
-            expanded_ids.add(neighbor_id)
+        )
 
     expanded.sort(key=lambda n: n.score, reverse=True)
     return expanded
@@ -233,10 +337,12 @@ def expand_graph_neighbors(
     query_tokens: set[str],
     workspace: str | None = None,
     max_calls_depth: int = MAX_CALLS_DEPTH,
+    query_embedding: list[float] | None = None,
+    embed_model: Any | None = None,
 ) -> list[RetrievedNote]:
-    """Expand seed notes using tier-aware edge heuristics.
+    """Expand seed notes using tier-aware edge heuristics + optional triple scoring.
 
-    Depth-1: all edge types (subject to skip rules).
+    Depth-1: all edge types (subject to skip rules), triple-embedding scored.
     Depth-2+: CALLS edges only — follow symbol call chains up to max_calls_depth.
     """
     if not graph_store or not seed_notes:
@@ -246,32 +352,30 @@ def expand_graph_neighbors(
     seed_scores = {n.note_id: n.score for n in seed_notes}
     all_seen = set(seed_ids)
 
-    # ── Depth 1: full expansion (all edge types) ─────────────────────────
+    # ── Depth 1: full expansion ───────────────────────────────────────────
     depth1 = _expand_one_hop(
         graph_store, parsed_notes, seed_notes, seed_scores,
         query_tokens, exclude_ids=all_seen, workspace=workspace, depth=1,
+        query_embedding=query_embedding, embed_model=embed_model,
     )
     all_seen.update(n.note_id for n in depth1)
-
     all_expanded = list(depth1)
 
     # ── Depth 2+: CALLS-only expansion ───────────────────────────────────
-    # Follow symbol→symbol call chains beyond depth-1.
     current_frontier = [n for n in depth1 if n.tier == "1"]
     frontier_scores = {n.note_id: n.score for n in current_frontier}
 
     for d in range(2, max_calls_depth + 1):
         if not current_frontier:
             break
-
         deeper = _expand_one_hop(
             graph_store, parsed_notes, current_frontier, frontier_scores,
             query_tokens, exclude_ids=all_seen, workspace=workspace,
             depth=d, edge_filter={"CALLS"},
+            query_embedding=query_embedding, embed_model=embed_model,
         )
         if not deeper:
             break
-
         all_seen.update(n.note_id for n in deeper)
         all_expanded.extend(deeper)
         current_frontier = [n for n in deeper if n.tier == "1"]
@@ -280,8 +384,9 @@ def expand_graph_neighbors(
     all_expanded.sort(key=lambda n: n.score, reverse=True)
 
     log.info(
-        "Graph expansion: %d depth-1 + %d deeper from %d seeds",
+        "Graph expansion: %d depth-1 + %d deeper from %d seeds (triple_embed=%s)",
         len(depth1), len(all_expanded) - len(depth1), len(seed_notes),
+        "yes" if query_embedding is not None else "no",
     )
 
     return all_expanded
@@ -297,16 +402,17 @@ class ObsidiClawRetriever:
 
     1. VectorStoreIndex.as_retriever() for top-k semantic seeds
     2. SimplePropertyGraphStore.get_triplets() for depth-1 expansion
-       with per-edge-type score multipliers
+       with per-edge-type score multipliers + relational triple embedding (#2)
     3. Tag boosting applied to both
     4. Index notes filtered from both
+    5. via_edge + via_source_title set on all graph-expanded notes (#4)
     """
 
     def __init__(
         self,
         index: VectorStoreIndex,
         graph_store: Optional[SimplePropertyGraphStore],
-        embed_model: OllamaEmbedding,
+        embed_model: Any,
         parsed_notes: dict[str, ParsedNote],
         similarity_top_k: int = 8,
     ) -> None:
@@ -320,14 +426,20 @@ class ObsidiClawRetriever:
         """Run hybrid retrieval.
 
         Returns (seed_notes, expanded_notes) — both lists filtered and scored.
-        If workspace is set, only notes from that workspace are returned as seeds.
-        Graph-expanded notes are also filtered to the same workspace.
         """
         query_tokens = set(
             normalize_token(w) for w in query.lower().split() if normalize_token(w)
         )
 
-        # ── Step 1: Vector seeds ──────────────────────────────────────────
+        # ── Step 1: Embed query (reused for triple scoring) ───────────────
+        query_embedding: list[float] | None = None
+        if self.embed_model is not None:
+            try:
+                query_embedding = self.embed_model.get_text_embedding(query)
+            except Exception as exc:
+                log.warning("Query embedding failed, triple scoring disabled: %s", exc)
+
+        # ── Step 2: Vector seeds ──────────────────────────────────────────
         retriever_kwargs: dict = {"similarity_top_k": self.similarity_top_k}
         if workspace:
             from llama_index.core.vector_stores.types import (
@@ -335,7 +447,6 @@ class ObsidiClawRetriever:
                 MetadataFilter,
                 FilterOperator,
             )
-
             retriever_kwargs["filters"] = MetadataFilters(
                 filters=[
                     MetadataFilter(
@@ -357,7 +468,6 @@ class ObsidiClawRetriever:
             raw_id = node.id_ or ""
             metadata = getattr(node, "metadata", {}) or {}
 
-            # Chunk dedup: map chunk IDs back to parent note
             parent_id = str(metadata.get("parent_note_id", ""))
             note_id = parent_id if parent_id else raw_id
             file_path = str(metadata.get("file_path", note_id))
@@ -373,9 +483,6 @@ class ObsidiClawRetriever:
             tier = parsed.tier if parsed else ""
             ws = parsed.workspace if parsed else str(metadata.get("workspace", ""))
 
-            # Workspace scope is a hard contract for scoped retrieval.
-            # If the vector backend violates metadata filtering, fail this path
-            # and let the engine fall back to deterministic keyword retrieval.
             if workspace and ws != workspace:
                 raise WorkspaceScopeViolationError(
                     f"workspace scope violated: requested={workspace!r} got={ws!r} note={file_path!r}"
@@ -383,11 +490,9 @@ class ObsidiClawRetriever:
 
             boosted_score = _apply_tag_boost(score, tags, query_tokens)
 
-            # If we already have a seed for this note (from another chunk), keep highest score
             if file_path in seed_ids:
                 if boosted_score > seed_scores.get(file_path, 0.0):
                     seed_scores[file_path] = boosted_score
-                    # Update the existing seed's score
                     for s in seeds:
                         if s.note_id == file_path:
                             s.score = boosted_score
@@ -414,22 +519,22 @@ class ObsidiClawRetriever:
             seed_ids.add(file_path)
             seed_scores[file_path] = boosted_score
 
-        # ── Step 2: Tier-aware graph expansion ────────────────────────────
+        # ── Step 3: Tier-aware graph expansion + triple scoring ───────────
         expanded = expand_graph_neighbors(
             graph_store=self.graph_store,
             parsed_notes=self.parsed_notes,
             seed_notes=seeds,
             query_tokens=query_tokens,
             workspace=workspace,
+            query_embedding=query_embedding,
+            embed_model=self.embed_model,
         )
 
         seeds.sort(key=lambda n: n.score, reverse=True)
 
         log.info(
             "Retrieved %d seeds + %d expanded for query: %.60s...",
-            len(seeds),
-            len(expanded),
-            query,
+            len(seeds), len(expanded), query,
         )
 
         return seeds, expanded
