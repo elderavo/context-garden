@@ -143,9 +143,26 @@ class KnowledgeGraphEngine:
             # Provider available — build or load vector index
             self.embed_model = embed_model_obj
             Settings.embed_model = embed_model_obj
-            self._build_or_load_vector_index(notes, notes_by_id, embed_model_obj)
-            self._mode = "full"
-            self._degraded_reason = ""
+
+            # CG_SKIP_INDEX_ON_BOOT=1: defer expensive vector build if no cache exists.
+            # Useful when booting large repos for the first time — start in degraded
+            # mode and let the operator trigger reindex() explicitly.
+            skip_build = os.environ.get("CG_SKIP_INDEX_ON_BOOT", "0") == "1"
+            if skip_build and not self._has_persisted_index():
+                self.index = None
+                self._mode = "degraded"
+                self._degraded_reason = (
+                    "Index build deferred (CG_SKIP_INDEX_ON_BOOT=1) — "
+                    "call reindex() to build the vector index"
+                )
+                log.info(
+                    "CG_SKIP_INDEX_ON_BOOT=1: skipping initial vector index build; "
+                    "start degraded. Run reindex() to build."
+                )
+            else:
+                self._build_or_load_vector_index(notes, notes_by_id, embed_model_obj)
+                self._mode = "full"
+                self._degraded_reason = ""
 
         else:
             # Provider configured but unreachable

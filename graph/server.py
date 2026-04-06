@@ -10,6 +10,11 @@ The background thread serializes index writes via a queue.Queue — no concurren
 writes to the LlamaIndex state. No stdout writes from the background thread
 (avoids the stdout/engine lock inversion that caused the old ThreadPoolExecutor
 deadlock).
+
+Queue is bounded (MAX_PENDING_JOBS). When full, incoming paths are coalesced
+into an overflow accumulator and flushed as a single reconcile job once the
+queue drains. This prevents unbounded memory growth during large git checkouts
+or rapid file-change storms.
 """
 
 from __future__ import annotations
@@ -19,8 +24,7 @@ import queue as _queue_module
 import sys
 import threading
 import traceback
-from dataclasses import asdict
-from typing import Any
+from typing import Any, Optional
 
 from .engine import KnowledgeGraphEngine
 from .protocol import RpcError, RpcRequest, RpcResponse, parse_request, send_response, send_notification
@@ -35,6 +39,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Hard cap on pending index jobs. When full, new jobs are coalesced into the
+# overflow accumulator instead of growing memory unboundedly.
+MAX_PENDING_JOBS = 50
+
+# How often (seconds) to emit a metrics snapshot to stderr.
+METRICS_INTERVAL_SECS = 300  # 5 minutes
+
+# ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
 
@@ -46,10 +61,46 @@ engine = KnowledgeGraphEngine()
 # A single daemon thread serialises incremental_update calls so the main
 # RPC loop never blocks on embedding. The queue holds param dicts; None is
 # the shutdown sentinel.
+#
+# Overflow coalescing: if the queue fills up (e.g. during a large git checkout),
+# incoming changed/deleted paths are merged into _overflow_* accumulators.
+# After the worker drains the queue it flushes any overflow as a single job.
 
-_index_queue: _queue_module.Queue[dict[str, Any] | None] = _queue_module.Queue()
+_index_queue: _queue_module.Queue[dict[str, Any] | None] = _queue_module.Queue(maxsize=MAX_PENDING_JOBS)
 _index_thread: threading.Thread | None = None
 _index_thread_lock = threading.Lock()
+
+_overflow_lock = threading.Lock()
+_overflow_changed: list[str] = []
+_overflow_deleted: list[str] = []
+_overflow_event_count = 0  # number of coalesced events (for logging)
+
+
+def _flush_overflow() -> None:
+    """If overflow accumulated, run a single reconcile job. Called from worker thread."""
+    global _overflow_event_count
+    with _overflow_lock:
+        if not _overflow_changed and not _overflow_deleted:
+            return
+        changed = list(_overflow_changed)
+        deleted = list(_overflow_deleted)
+        n_events = _overflow_event_count
+        _overflow_changed.clear()
+        _overflow_deleted.clear()
+        _overflow_event_count = 0
+
+    log.info(
+        "Queue overflow flush: %d changed + %d deleted paths from %d coalesced events",
+        len(changed), len(deleted), n_events,
+    )
+    try:
+        engine.incremental_update(
+            changed_paths=changed,
+            deleted_paths=deleted,
+            progress_cb=None,
+        )
+    except Exception as exc:
+        log.error("Overflow flush incremental_update failed: %s", exc)
 
 
 def _index_worker() -> None:
@@ -57,6 +108,8 @@ def _index_worker() -> None:
         params = _index_queue.get()
         if params is None:
             _index_queue.task_done()
+            # Flush any remaining overflow before shutting down
+            _flush_overflow()
             break
         try:
             engine.incremental_update(
@@ -69,6 +122,10 @@ def _index_worker() -> None:
         finally:
             _index_queue.task_done()
 
+        # After processing an item, flush overflow if queue is now empty
+        if _index_queue.empty():
+            _flush_overflow()
+
 
 def _ensure_index_thread() -> None:
     global _index_thread
@@ -76,6 +133,52 @@ def _ensure_index_thread() -> None:
         if _index_thread is None or not _index_thread.is_alive():
             _index_thread = threading.Thread(target=_index_worker, name="indexer", daemon=True)
             _index_thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Metrics snapshots
+# ---------------------------------------------------------------------------
+
+_metrics_timer: Optional[threading.Timer] = None
+
+
+def _get_rss_mb() -> Optional[float]:
+    """Return process RSS in MB, or None if psutil is not available."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / (1024.0 * 1024.0)
+    except Exception:
+        return None
+
+
+def _log_metrics_snapshot() -> None:
+    """Log queue depth, overflow depth, and RSS to stderr."""
+    queue_depth = _index_queue.qsize()
+    with _overflow_lock:
+        overflow_paths = len(_overflow_changed) + len(_overflow_deleted)
+    rss_mb = _get_rss_mb()
+
+    if rss_mb is not None:
+        log.info(
+            "[metrics] queue_depth=%d overflow_paths=%d rss_mb=%.1f note_count=%d",
+            queue_depth, overflow_paths, rss_mb, len(engine._parsed_notes),
+        )
+    else:
+        log.info(
+            "[metrics] queue_depth=%d overflow_paths=%d note_count=%d",
+            queue_depth, overflow_paths, len(engine._parsed_notes),
+        )
+
+
+def _schedule_metrics() -> None:
+    global _metrics_timer
+    try:
+        _log_metrics_snapshot()
+    except Exception as exc:
+        log.debug("Metrics snapshot failed: %s", exc)
+    _metrics_timer = threading.Timer(METRICS_INTERVAL_SECS, _schedule_metrics)
+    _metrics_timer.daemon = True
+    _metrics_timer.start()
 
 
 def handle_initialize(params: dict[str, Any]) -> dict[str, Any]:
@@ -116,10 +219,27 @@ def handle_incremental_update(params: dict[str, Any]) -> dict[str, Any]:
 
     The actual embedding + graph work runs in the background indexer thread.
     This keeps the main RPC loop free to serve retrieve/find_path requests.
+
+    If the queue is at capacity (MAX_PENDING_JOBS), the paths are merged into
+    the overflow accumulator instead. The worker flushes overflow once the
+    queue drains, preventing unbounded queue growth during event storms.
     """
+    global _overflow_event_count
     _ensure_index_thread()
-    _index_queue.put(params)
-    return {"queued": True, "queue_depth": _index_queue.qsize()}
+    try:
+        _index_queue.put_nowait(params)
+        return {"queued": True, "coalesced": False, "queue_depth": _index_queue.qsize()}
+    except _queue_module.Full:
+        with _overflow_lock:
+            _overflow_changed.extend(params.get("changed_paths", []))
+            _overflow_deleted.extend(params.get("deleted_paths", []))
+            _overflow_event_count += 1
+            n = _overflow_event_count
+        log.warning(
+            "Index queue full (%d/%d) — coalescing event into overflow (overflow_events=%d)",
+            _index_queue.qsize(), MAX_PENDING_JOBS, n,
+        )
+        return {"queued": False, "coalesced": True, "queue_depth": _index_queue.qsize()}
 
 
 def handle_build_prune_clusters(params: dict[str, Any]) -> dict[str, Any]:
@@ -156,8 +276,22 @@ def handle_find_path(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_shutdown(params: dict[str, Any]) -> dict[str, Any]:
+    # Cancel metrics timer
+    if _metrics_timer is not None:
+        _metrics_timer.cancel()
     # Signal the indexer thread to stop after draining its queue
-    _index_queue.put(None)
+    try:
+        _index_queue.put_nowait(None)
+    except _queue_module.Full:
+        # Queue is full — force the sentinel in by clearing the overflow list first
+        with _overflow_lock:
+            _overflow_changed.clear()
+            _overflow_deleted.clear()
+        # Try once more; if still full, the thread will be killed when the process exits
+        try:
+            _index_queue.put_nowait(None)
+        except _queue_module.Full:
+            pass
     return {"ok": True}
 
 
@@ -191,6 +325,9 @@ def run_server(standalone: bool = False) -> None:
     indexer thread, so retrieve/find_path are never blocked by a reindex.
     """
     log.info("Knowledge graph server starting (standalone=%s)", standalone)
+
+    # Start periodic metrics snapshots (queue depth + RSS)
+    _schedule_metrics()
 
     for line in sys.stdin:
         line = line.strip()
