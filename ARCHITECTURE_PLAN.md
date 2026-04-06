@@ -1,366 +1,243 @@
-# ContextGarden 3‑Tier Architecture Plan (Tray + Gateway + Indexer)
+# ContextGarden Architecture Plan
 
-Date: 2026-04-06
-
-This document proposes a scalable, extensible refactor that keeps ContextGarden responsive and memory-stable on developer laptops by splitting the system into three cooperating processes:
-
-1. **Tray App (Controller/UX)**: starts/stops services, manages workspaces/config, shows status/health.
-2. **Gateway Server (Lightweight MCP interface)**: speaks MCP over stdio to the agent client; forwards to indexer; enforces limits.
-3. **Indexer Daemon (Heavy worker)**: watches files, performs incremental indexing, serves retrieval/path queries from persisted indexes.
-
-The core goals are:
-- **Fast startup** (O(1) open DBs + load small metadata, no scans at boot)
-- **Bounded memory** (bounded queues + bounded caches + streaming/chunked processing)
-- **Incremental indexing** (hash-based deltas; no full rebuilds unless necessary)
-- **Extensibility** (pluggable parsers, chunkers, retrievers, stores)
-- **Operational control** (pause/resume, concurrency knobs, observability)
+Date: 2026-04-06 (revised)
 
 ---
 
-## 0) Current pain & likely causes (hypotheses)
+## 1. Overview
 
-Symptoms: “laptop groaning” on startup and/or during indexing; suspected memory issue.
+ContextGarden is a two-process system:
 
-Common root causes in RAG/indexer systems:
-- **Startup does too much work**: scanning/parsing/embedding at server boot.
-- **Unbounded queues**: watcher events accumulate during big `git checkout` or build steps.
-- **Unbounded caches**: note bodies, parsed ASTs, embeddings, graph objects grow without eviction.
-- **Large in-memory indexes**: loading vector/graph state fully into RAM on init.
-- **Synchronous hot paths**: retrieval blocks on indexing; no separation of concerns.
+- **Python Daemon** — the heavy worker. Owns file watching, incremental indexing, graph maintenance, and retrieval. Runs persistently (started at OS login; TS gateway spawns it as a fallback). Exposes a JSON-RPC API over localhost TCP.
+- **TypeScript Gateway** — the MCP interface. Speaks MCP stdio to the agent client. Owns context synthesis, LLM calls, and markdown tooling. Forwards index/retrieval operations to the daemon over TCP.
 
-This plan is designed to address all of the above with explicit constraints and architectural boundaries.
+The daemon is the source of truth for all knowledge graph state. The gateway is stateless with respect to the index.
 
 ---
 
-## 1) Target architecture overview
+## 2. Process architecture
 
-### 1.1 Processes and responsibilities
-
-**A) Tray App (Controller/UX)**
-- Starts/stops/restarts Gateway + Indexer.
-- Workspace management UI: add/remove roots, include/exclude globs, language selection.
-- Configuration UI: embed/LLM providers & models, concurrency limits, thresholds.
-- Health UI: indexing status, queue depth, last indexed time, memory/CPU, error surface.
-- “Safety controls”: pause indexing, rebuild index, clear caches, open logs.
-
-**B) Gateway Server (MCP interface)**
-- Speaks MCP over stdio (what Claude Desktop/Codex clients expect).
-- Minimal state; no filesystem watchers.
-- Forwards API calls to Indexer Daemon via local IPC.
-- Enforces safety limits:
-  - max request/response size
-  - timeouts
-  - rate limits per tool
-  - workspace allow-listing
-- Streams progress events (optional) as MCP notifications if the client supports them.
-
-**C) Indexer Daemon (Heavy worker + query service)**
-- Owns all “heavy” compute and memory:
-  - file watching & debounced batching
-  - parsing + chunking
-  - embeddings + vector index updates
-  - graph/link extraction + updates
-  - retrieval/path queries against on-disk indexes
-- Implements bounded resource policies:
-  - bounded job queue + coalescing
-  - bounded caches (LRU with byte budgets)
-  - limited concurrency (embedding/parsing)
-  - memory pressure valve (pause watchers, shrink caches)
-
-### 1.2 Data plane vs control plane
-
-- **Control plane**: workspaces, config, job orchestration, status/health, pause/resume.
-- **Data plane**: incremental indexing inputs and retrieval outputs.
-
-This separation ensures the Gateway remains cheap and responsive and the Indexer can be restarted independently.
+```
+Agent (Claude Desktop / Codex)
+        │ MCP stdio
+        ▼
+  TypeScript Gateway
+  - MCP server (stdio)
+  - Context synthesizer
+  - LLM client
+  - Markdown tooling
+        │ JSON-RPC over TCP (localhost)
+        ▼
+  Python Daemon
+  - watchdog file watcher (per workspace)
+  - Incremental indexer
+  - LlamaIndex vector + graph store
+  - Retrieval pipeline
+  - Workspace registry (persisted to disk)
+```
 
 ---
 
-## 2) IPC choice and protocol design
+## 3. Python Daemon
 
-### 2.1 Recommended IPC options (pick one)
+### 3.1 Startup
 
-**Option 1 (recommended for speed-to-ship): JSON-RPC over localhost TCP**
-- Pros: quick to implement, matches current newline-delimited JSON patterns, easy debugging.
-- Cons: less strict typing unless paired with JSON schema / zod.
+On boot:
+1. Load `~/.contextgarden/registry.json` — list of registered workspaces.
+2. For each workspace, load its persisted LlamaIndex index from `~/.contextgarden/<workspace_id>/`.
+3. Start a watchdog watcher for each workspace root immediately. No re-embedding unless files changed while the daemon was offline (detected by mtime/hash on first scan).
+4. Begin listening on `127.0.0.1:<port>` (default `7432`, configurable via `CG_DAEMON_PORT`).
 
-**Option 2: gRPC (Protobuf)**
-- Pros: typed contracts, streaming built in, easier long-term compatibility.
-- Cons: more setup and build plumbing.
+The daemon does **not** wait for a client connection before watching. It stays active as long as the OS session is running.
 
-**Option 3: Named pipes (Windows) / Unix domain sockets**
-- Pros: efficient local IPC, better OS integration.
-- Cons: cross-platform complexity.
+### 3.2 Persistence layout
 
-For an initial refactor, **JSON-RPC over TCP** is the pragmatic choice; migrate to gRPC later if desired.
+```
+~/.contextgarden/                   # configurable via CG_DATA_DIR
+  registry.json                     # list of registered workspaces
+  <workspace_id>/
+    meta.json                       # workspace name, root_path, config
+    index/                          # LlamaIndex VectorStoreIndex JSON
+    graph/                          # SimplePropertyGraphStore JSON
+    file_hashes.json                # path -> content_hash, for drift detection on restart
+```
 
-### 2.2 Contract versioning
+On restart, `file_hashes.json` is used to detect files that changed while the daemon was offline. Only changed/deleted files are re-embedded — no full rebuild.
 
-Every request/response includes:
-- `request_id` (UUID)
-- `schema_version` (e.g., `"v1"`)
-- `workspace_id` (UUID, not path)
+### 3.3 Workspace registry
 
-Rules:
-- **Backward compatibility** at least within a major version.
-- Reject unknown major versions with actionable errors.
+Workspaces are persisted to `registry.json`. Once registered, they survive daemon restarts without the gateway re-registering. The gateway can still call `workspaces.register` to add new ones at any time.
 
-### 2.3 Core API surface (v1)
+### 3.4 File watcher
+
+The Python daemon uses **watchdog** for cross-platform file watching. Each registered workspace gets its own `Observer`. Events are:
+- Debounced with a 500ms window before queuing.
+- Coalesced per workspace — a burst of changes becomes one job.
+- Queued in the bounded job queue (cap: `CG_MAX_PENDING_JOBS`, default 50). Overflow is coalesced into a single reconcile job (already implemented in Phase 1).
+
+The TypeScript layer has no file watcher.
+
+### 3.5 Embedding providers
+
+The daemon uses a pluggable `EmbedProvider` interface:
+
+```python
+class EmbedProvider(Protocol):
+    def get_text_embedding(self, text: str) -> list[float]: ...
+    def get_text_embeddings(self, texts: list[str]) -> list[list[float]]: ...
+    @property
+    def model_id(self) -> str: ...
+```
+
+Built-in implementations:
+- `OllamaEmbedProvider` — default, uses `OLLAMA_HOST` / `CG_EMBED_MODEL`
+- `OpenAIEmbedProvider` — activated when `OPENAI_API_KEY` is set and `CG_EMBED_PROVIDER=openai`
+
+Provider and model are resolved at daemon startup from env vars / config. Changing provider requires a full reindex (daemon warns and refuses to mix embedding spaces).
+
+### 3.6 RPC API (v1)
+
+All requests/responses are newline-delimited JSON over a persistent TCP connection. Each message includes `id`, `method`, `params`. Responses include `id` + either `result` or `error`.
 
 **Workspaces**
-- `workspaces.register({ name, root_path, languages, include_globs?, exclude_globs? }) -> { workspace_id }`
-- `workspaces.list() -> { workspaces: [...] }`
-- `workspaces.unregister({ workspace_id, delete_data? }) -> { ok }`
-- `workspaces.status({ workspace_id }) -> { state, last_indexed_at, queue_depth, docs, chunks, ... }`
+```
+workspaces.register({ name, root_path, include_globs?, exclude_globs? }) -> { workspace_id }
+workspaces.list() -> { workspaces: [{ workspace_id, name, root_path, state, last_indexed_at }] }
+workspaces.unregister({ workspace_id, delete_data? }) -> { ok }
+workspaces.status({ workspace_id }) -> { state, queue_depth, doc_count, last_indexed_at, watcher_active }
+```
 
-**Index jobs**
-- `index.enqueue({ workspace_id, changed_paths, deleted_paths, reason }) -> { job_id }`
-- `index.rebuild({ workspace_id, reason }) -> { job_id }`
-- `index.pause({ workspace_id? }) -> { ok }`
-- `index.resume({ workspace_id? }) -> { ok }`
-- `index.job_status({ job_id }) -> { state, progress, errors? }`
-- `index.cancel({ job_id }) -> { ok }`
+**Index**
+```
+index.enqueue({ workspace_id, changed_paths, deleted_paths }) -> { job_id, queue_depth }
+index.rebuild({ workspace_id }) -> { job_id }
+index.pause({ workspace_id? }) -> { ok }
+index.resume({ workspace_id? }) -> { ok }
+```
 
 **Query**
-- `query.retrieve({ workspace_id?, query, top_k?, max_chars? }) -> { context_markdown, notes: [...], meta: {...} }`
-- `query.find_path({ workspace_id?, start, end, max_depth?, edge_types? }) -> { path: [...] }`
-- `query.stats({ workspace_id? }) -> { docs, chunks, nodes, edges, index_version, ... }`
+```
+query.retrieve({ workspace_id?, query, top_k?, max_chars? }) -> { notes, context_markdown, meta }
+query.find_path({ workspace_id?, start, end, max_depth?, edge_types? }) -> { path }
+query.stats({ workspace_id? }) -> { doc_count, node_count, edge_count }
+```
 
-**Config**
-- `config.get() -> { embedding: {...}, synthesizer: {...}, limits: {...} }`
-- `config.set({ ... }, persist? ) -> { ok }`
+**Daemon**
+```
+daemon.health() -> { status, uptime_secs, rss_mb, workspaces }
+daemon.shutdown() -> { ok }
+```
 
-**Events (stream)**
-- `events.subscribe({ workspace_id? }) -> stream of { type, timestamp, payload }`
-  - `index.progress`, `index.warning`, `index.error`, `memory.pressure`, `queue.depth`, `watcher.debounced`
+### 3.7 Retrieval quality (primary pain point)
 
----
+The current retrieval pipeline returns semantically similar chunks but misses important context. The improved pipeline:
 
-## 3) Storage design (persisted, restart-fast)
+1. **Candidate retrieval**: vector similarity top-K (existing).
+2. **Keyword boost**: BM25 over note bodies, merged with vector scores. Prevents pure-semantic misses on exact terms (file names, function names, jargon).
+3. **Graph expansion**: from each retrieved note, walk 1–2 hops in the property graph (wikilinks, `related_to`, `depends_on` edges). Add neighbor notes if they're not already in the result set.
+4. **Recency boost**: small score bump for recently modified files (configurable weight, default 0.1).
+5. **Deduplication**: if two chunks from the same file are retrieved, merge them into one note entry.
+6. **Formatting**: produce `context_markdown` with source citations (relative path + line range).
 
-The Indexer should persist its state so restarts do not trigger reindex.
-
-### 3.1 Stores (embedded, local-first)
-
-**A) Document store (SQLite)**
-- Tables:
-  - `files(workspace_id, path, mtime, size, content_hash, parse_version, ...)`
-  - `chunks(chunk_id, workspace_id, file_path, chunk_hash, start, end, text, metadata_json, ...)`
-
-**B) Vector index**
-Pick one:
-- SQLite + `sqlite-vss` (simple; good enough for many repos)
-- LanceDB (good local experience; columnar; efficient)
-- FAISS + sidecar mapping table (fast, but more glue)
-
-Store embeddings keyed by `(provider, model, chunk_hash)` to enable reuse:
-- `embeddings(embed_id, provider, model, chunk_hash, vector_blob, dims, created_at)`
-- `chunk_embeddings(chunk_id, embed_id)`
-
-**C) Graph/link index (SQLite)**
-- `nodes(node_id, workspace_id, label, type, attrs_json)`
-- `edges(edge_id, workspace_id, src_node_id, dst_node_id, edge_type, weight, attrs_json)`
-
-### 3.2 Schema migrations
-
-Maintain `schema_version` and forward-only migrations.
-- Minor changes: migrate in place.
-- Incompatible changes: rebuild indexes in background; keep serving stale index until ready.
+The `query.retrieve` response always includes a `meta` field with retrieval scores and provenance so the TS synthesizer can make informed decisions about what to include.
 
 ---
 
-## 4) Indexing pipeline (incremental + bounded)
+## 4. TypeScript Gateway
 
-### 4.1 Incremental update strategy
+### 4.1 Responsibilities
 
-Per file:
-- Compute `content_hash` (fast hash; optionally chunked to reduce memory).
-- If unchanged, skip.
-- If changed:
-  - parse -> chunk -> compute `chunk_hash` for each chunk
-  - reuse embeddings for existing `chunk_hash` if present
-  - update stores (doc, vector, graph)
+- MCP stdio server (unchanged interface for agent clients).
+- Context synthesizer: takes raw retrieval results, calls the LLM to synthesize a focused answer.
+- LLM client: OpenAI / Anthropic / Ollama calls for synthesis.
+- Markdown tooling: frontmatter parsing, wikilink resolution, vault schema validation.
+- Daemon client: connects to `127.0.0.1:7432`, forwards tool calls, handles reconnect.
 
-Deletion:
-- Remove file row, chunks, chunk_embeddings, and any graph references; maintain integrity.
+### 4.2 Daemon client behavior
 
-### 4.2 Watcher batching + coalescing
+On startup:
+1. Probe `CG_DAEMON_PORT` (default `7432`) with `daemon.health()`.
+2. If unreachable, spawn the daemon process (`python -m graph.daemon`) and wait up to 10s for it to be ready.
+3. Maintain one persistent TCP connection. On disconnect, retry with exponential backoff (max 30s).
 
-Key requirement: avoid event storms exploding memory.
+The gateway never loads the knowledge index into memory.
 
-- Debounce window: `250–1000ms`
-- Coalesce paths per workspace; dedupe
-- Bounded queue:
-  - if queue exceeds `N`, merge jobs into a single “reconcile” job:
-    - rescan file manifest and compute deltas once
+### 4.3 MCP tool mapping
 
-### 4.3 Concurrency and backpressure
+| MCP tool | Daemon call |
+|---|---|
+| `register_workspace` | `workspaces.register` |
+| `list_workspaces` | `workspaces.list` |
+| `unregister_workspace` | `workspaces.unregister` |
+| `retrieve_context` | `query.retrieve` → synthesizer → response |
+| `find_path` | `query.find_path` |
+| `get_graph_stats` | `query.stats` |
+| `reindex` | `index.rebuild` |
 
-Embedding is the most expensive step. Defaults:
-- `embed_concurrency = 1` (safe), configurable up to 4.
-- `parse_concurrency = min(2, cpu_cores)`
-- Maximum bytes per batch: e.g. `CG_INDEX_MAX_BATCH_MB=8`
-
-Backpressure rules:
-- If embed queue grows: stop accepting new embed tasks; keep accepting “file changed” events only as coalesced manifest updates.
-
-### 4.4 Memory budgets (hard limits)
-
-Implement explicit budgets to prevent slow leaks from becoming outages:
-- LRU caches with max bytes:
-  - `note_body_cache_bytes`
-  - `parsed_cache_bytes` (if any)
-  - `recent_results_cache_bytes` (optional)
-- Queue size limits:
-  - `max_pending_jobs`
-  - `max_pending_embed_tasks`
-
-Memory pressure valve:
-- If RSS (or heap) crosses a threshold:
-  1) pause watchers
-  2) clear caches
-  3) reduce concurrency
-  4) resume when below hysteresis threshold
+`retrieve_context` is the only tool that goes through the TS synthesizer before returning. All others are pass-through.
 
 ---
 
-## 5) Retrieval design (hybrid, modular)
+## 5. Daemon lifecycle
 
-### 5.1 Retrieval pipeline (pluggable)
+**Normal path (daemon already running)**:
+- OS login item / startup script launches `python -m graph.daemon`.
+- Daemon loads persisted indexes, starts watchers, listens on TCP.
+- Agent starts → gateway spawns, probes port, connects.
 
-Stages:
-1. Candidate retrieval:
-   - vector similarity (top K)
-   - optional keyword/BM25
-2. Boosting:
-   - recency
-   - workspace tags
-   - file path heuristics (e.g., `src/`, `docs/`)
-3. Graph expansion:
-   - expand neighbors up to depth D with weights
-4. Formatting:
-   - produce context markdown + citations to chunk/file paths
+**Fallback path (daemon not running)**:
+- Gateway probes port on startup → no response.
+- Gateway spawns daemon as a child process.
+- Child inherits stderr for logging; stdout is not used (RPC is on the TCP socket).
+- Gateway waits for `daemon.health()` to succeed before accepting MCP calls.
 
-Define interfaces (TS/Python depending on where retrieval runs):
-- `Retriever`, `Reranker`, `GraphExpander`, `Formatter`
-
-Make it easy to add:
-- a reranker model later
-- a “tool note” source later
-- multi-workspace federation later
+**Shutdown**:
+- Gateway sends `daemon.shutdown()` only if it spawned the daemon itself (not if it was pre-running).
+- Daemon drains the job queue, flushes overflow, persists state, then exits.
 
 ---
 
-## 6) Tray App plan (controller UX)
+## 6. Configuration
 
-### 6.1 Feature set (v1)
-- Show: running/stopped, index lag, last indexed, queue depth, memory/CPU.
-- Workspaces: add/remove; per-workspace include/exclude globs.
-- Buttons: pause/resume indexing, rebuild index, open logs folder.
-- Provider config: embed/LLM model/provider, keys stored in OS keychain if possible.
+All configuration via environment variables (with sensible defaults). No config file API for now.
 
-### 6.2 Process supervision
-
-Tray app supervises two child processes:
-- `context-garden-gateway` (Node)
-- `context-garden-indexer` (Python or Node+Python)
-
-Policies:
-- restart on crash with exponential backoff
-- retain last N logs
-- show actionable error messages
+| Variable | Default | Purpose |
+|---|---|---|
+| `CG_DATA_DIR` | `~/.contextgarden` | Root for persisted indexes and registry |
+| `CG_DAEMON_PORT` | `7432` | TCP port for daemon RPC |
+| `CG_EMBED_PROVIDER` | `ollama` | `ollama` or `openai` |
+| `CG_EMBED_MODEL` | `nomic-embed-text` | Model name passed to provider |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama base URL |
+| `CG_MAX_PENDING_JOBS` | `50` | Bounded job queue cap |
+| `CG_SKIP_INDEX_ON_BOOT` | unset | If `1`, skip initial drift scan (start degraded) |
+| `CG_LOG_LEVEL` | `INFO` | Python logging level |
 
 ---
 
-## 7) Gateway Server plan (MCP interface)
+## 7. Implementation phases
 
-### 7.1 Responsibilities
-- MCP stdio server only.
-- Connects to indexer via IPC and forwards tool calls.
-- Adds safety:
-  - `max_chars` enforcement
-  - tool timeouts
-  - workspace allow-list
-  - request validation
+### Phase 1 — Stabilize (complete)
+- Bounded queue + overflow coalescing.
+- Periodic metrics logging (queue depth, RSS).
+- `CG_SKIP_INDEX_ON_BOOT` flag.
 
-### 7.2 Tools mapping
+### Phase 2 — Daemon extraction (complete)
+1. ✅ Added `watchdog>=4.0.0` + `rank-bm25>=0.2.2` to `graph/requirements.txt` and `graph/environment.yml`.
+2. ✅ Implemented `graph/daemon.py`: asyncio TCP server on port 7432, RPC dispatch, workspace registry persistence (`~/.contextgarden/registry.json`), `file_hashes.json` drift detection on boot, per-workspace watchdog observers (500ms debounce).
+3. ✅ Added `EmbedProvider` Protocol to `graph/providers.py`; CG_EMBED_* env vars (with OBSIDI_EMBED_* fallback).
+4. ✅ Added `src/engine/daemon-client.ts`: TCP client, spawn-if-not-running fallback, exponential backoff reconnect.
+5. ✅ Updated `src/engine/context-engine.ts`: replaced stdio subprocess with DaemonClient; maps old RPC methods to new daemon API (query.retrieve, query.find_path, index.rebuild, index.enqueue, etc.).
+6. ⬜ Remove chokidar watcher from TS (kept for now — TS still mirrors source code via chokidar; daemon watches the md_db notes).
 
-Existing MCP tools remain, but implementation changes:
-- `register_workspace` -> indexer `workspaces.register`
-- `list_workspaces` -> indexer `workspaces.list`
-- `unregister_workspace` -> indexer `workspaces.unregister`
-- `retrieve_context` -> indexer `query.retrieve`
-- `find_path` -> indexer `query.find_path`
-- `configure` -> indexer `config.set/get`
-
-The Gateway should never load the knowledge base into memory.
+### Phase 3 — Tray app (future)
+- System tray UI for workspace management, status, pause/resume, logs.
+- Process supervision with restart policies.
 
 ---
 
-## 8) Migration strategy (phased refactor)
+## 8. Open questions (deferred)
 
-### Phase 1: Stabilize current implementation (1–3 days)
-- Add memory/queue instrumentation and log periodic snapshots.
-- Add watcher debounce + job coalescing if missing.
-- Add hard caps on caches/queues.
-- Ensure startup does not auto-scan/index unless explicitly requested.
-
-Deliverable: current server behaves better, produces metrics for profiling.
-
-### Phase 2: Extract Indexer Daemon + IPC (3–7 days)
-- Implement indexer daemon process with:
-  - persistent stores
-  - RPC over localhost TCP
-  - background indexing jobs
-  - retrieval endpoints
-- Update existing ContextGarden server to become Gateway and forward calls.
-
-Deliverable: Gateway stays fast; indexer can be restarted independently.
-
-### Phase 3: Tray App (5–10 days)
-- Build tray app and process supervision.
-- UI for workspaces/config/status; log viewer.
-
-Deliverable: end-user experience; operational control and visibility.
-
-### Phase 4: Hardening & extensibility (ongoing)
-- Add reranker support, richer graph features, multi-workspace federation.
-- Add soak tests and regression tests for incremental correctness.
-
----
-
-## 9) Observability & test plan
-
-### 9.1 Metrics
-- `index.jobs.queue_depth`
-- `index.embed.queue_depth`
-- `index.throughput.docs_per_min`
-- `query.latency.p50/p95`
-- `process.rss_mb`, `process.heap_mb`
-- `gc.pause_ms` (Node)
-
-### 9.2 Soak tests
-- “Big repo” baseline: register workspace, wait until indexed, run query loop.
-- “Event storm”: `git checkout` across branches; ensure queue stays bounded.
-- “Leak check”: 1–2 hour idle with edits; RSS should plateau.
-
----
-
-## 10) Open decisions (confirm before implementation)
-
-1. IPC choice: JSON-RPC over TCP vs gRPC.
-2. Vector store: sqlite-vss vs LanceDB vs FAISS.
-3. Where retrieval runs: Indexer only (recommended) vs split.
-4. Tray tech: Tauri vs Electron.
-
----
-
-## 11) Immediate next steps checklist
-
-- [ ] Add periodic memory snapshots to current ContextGarden.
-- [ ] Add bounded queues + debounce/coalescing.
-- [ ] Make indexing opt-in (no work at boot).
-- [ ] Pick IPC + store tech and lock v1 schemas.
-- [ ] Implement indexer daemon skeleton + health endpoint.
-- [ ] Convert current MCP server into a pure gateway.
-
+- **Cross-workspace retrieval**: federation across multiple workspace indexes. Not needed yet.
+- **IPC upgrade**: migrate from JSON-RPC/TCP to gRPC if schema complexity grows.
+- **Reranker**: add a reranker model pass after candidate retrieval for further quality improvement.
+- **Tray tech**: Tauri vs Electron (Phase 3 decision).

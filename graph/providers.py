@@ -1,7 +1,9 @@
 """Provider-agnostic embedding configuration and factory.
 
-Reads OBSIDI_EMBED_* environment variables to determine which embedding
+Reads CG_EMBED_* environment variables to determine which embedding
 provider to use. Supports ollama, openai, and local (no embeddings).
+
+EmbedProvider Protocol is the public interface for embedding implementations.
 """
 
 from __future__ import annotations
@@ -10,9 +12,32 @@ import logging
 import os
 import urllib.request
 import urllib.error
-from typing import Any, Optional
+from typing import Any, Optional, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# EmbedProvider Protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class EmbedProvider(Protocol):
+    """Protocol for pluggable embedding backends."""
+
+    def get_text_embedding(self, text: str) -> list[float]:
+        """Embed a single text string."""
+        ...
+
+    def get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of text strings."""
+        ...
+
+    @property
+    def model_id(self) -> str:
+        """Stable identifier for this provider+model combo (used for cache invalidation)."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -20,13 +45,20 @@ log = logging.getLogger(__name__)
 
 
 def get_embed_config() -> dict[str, Any]:
-    """Read embedding config from environment variables with defaults."""
+    """Read embedding config from environment variables with defaults.
+
+    Supports both CG_EMBED_* (canonical) and legacy OBSIDI_EMBED_* names.
+    CG_EMBED_* takes precedence when both are set.
+    """
+    def _env(cg_key: str, legacy_key: str, default: str) -> str:
+        return os.environ.get(cg_key) or os.environ.get(legacy_key) or default
+
     return {
-        "provider": os.environ.get("OBSIDI_EMBED_PROVIDER", "ollama"),
-        "model": os.environ.get("OBSIDI_EMBED_MODEL", "nomic-embed-text:latest"),
-        "host": os.environ.get("OBSIDI_EMBED_HOST", "http://localhost:11434"),
+        "provider": _env("CG_EMBED_PROVIDER", "OBSIDI_EMBED_PROVIDER", "ollama"),
+        "model": _env("CG_EMBED_MODEL", "OBSIDI_EMBED_MODEL", "nomic-embed-text:latest"),
+        "host": _env("CG_EMBED_HOST", "OBSIDI_EMBED_HOST", "http://localhost:11434"),
         "api_key": os.environ.get("OPENAI_API_KEY", ""),
-        "context_length": int(os.environ.get("OBSIDI_EMBED_CONTEXT_LENGTH", "512")),
+        "context_length": int(_env("CG_EMBED_CONTEXT_LENGTH", "OBSIDI_EMBED_CONTEXT_LENGTH", "512")),
     }
 
 

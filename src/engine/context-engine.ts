@@ -1,34 +1,28 @@
 /**
- * ContextEngine — subprocess bridge to the Python graph service.
+ * ContextEngine — bridges MCP tool calls to the persistent Python daemon.
  *
- * Public API is identical to the original implementation.
- * Internally, all vector/graph operations are delegated to a long-lived
- * Python subprocess (graph) via JSON-RPC over stdin/stdout.
+ * In Phase 2, the Python graph service is no longer a stdio subprocess.
+ * It runs as a persistent TCP daemon (127.0.0.1:7432). This class:
+ *   - Resolves the Python executable (conda env contextgarden)
+ *   - Connects via DaemonClient (spawning the daemon if not running)
+ *   - Registers the md_db path as a workspace on first connect
+ *   - Delegates all retrieval/index operations over TCP
  *
- * What stays in TS:
- *   - Context formatting (formatContext)
+ * What stays in TS (unchanged):
+ *   - Context formatting (formatContext, formatPathContext)
  *   - Context reviewer (LLM synthesis call)
  *   - Debug event emission (ce_* events)
  *   - All public types
- *
- * What moves to Python:
- *   - md_db scanning/parsing
- *   - PropertyGraphIndex (LlamaIndex + BFS)
- *   - Hybrid retrieval (VectorContextRetriever + tag boosting)
- *   - Hash-based change detection
  */
 
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { randomUUID } from "crypto";
 import { EventEmitter } from "events";
-import { spawn, execSync, type ChildProcess } from "child_process";
-import { createInterface, type Interface as ReadlineInterface } from "readline";
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { ensureDir } from "../util/fs.js";
+import { mkdirSync } from "fs";
 import { getConfig } from "../config.js";
 import { stripFrontmatter, estimateTokens } from "./frontmatter-utils.js";
 import { ContextReviewer } from "./review/context-reviewer.js";
+import { DaemonClient, resolvePythonPath } from "./daemon-client.js";
 import type {
   ContextEngineConfig,
   ContextEngineEvent,
@@ -40,8 +34,6 @@ import type {
 
 const DEFAULT_TOP_K = 5;
 
-const RPC_TIMEOUT_MS = 1_800_000; // 30 minutes for long operations (indexing)
-
 // Returned verbatim when RAG produces zero results.
 const NOTHING_FOUND_CONTEXT =
   `## Nothing Found\n\n` +
@@ -49,30 +41,13 @@ const NOTHING_FOUND_CONTEXT =
   `**Next step**: Investigate the codebase directly (read files, search for symbols).`;
 
 // ---------------------------------------------------------------------------
-// RPC types
-// ---------------------------------------------------------------------------
-
-interface RpcPending {
-  resolve: (result: unknown) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-// ---------------------------------------------------------------------------
-// ContextEngine — subprocess bridge
+// ContextEngine
 // ---------------------------------------------------------------------------
 
 export class ContextEngine extends EventEmitter {
-  private subprocess: ChildProcess | null = null;
-  private rl: ReadlineInterface | null = null;
-  private subprocessExitPromise: Promise<void> | null = null;
-  private resolveSubprocessExit: (() => void) | null = null;
-  private readonly pendingRpc = new Map<string, RpcPending>();
+  private client: DaemonClient | null = null;
+  private workspaceId: string | null = null;
   private initialized = false;
-  private pythonPath: string | null = null;
-
-  /** In-memory note cache populated on init/reindex. */
-  private noteCache = new Map<string, string>();
 
   /** True when the Python engine is in degraded mode (no vector embeddings). */
   private degraded = false;
@@ -99,7 +74,6 @@ export class ContextEngine extends EventEmitter {
 
     this.onDebug = config.onDebug;
 
-    // Initialize context reviewer — always-on unless explicitly disabled
     this.reviewer = config.review?.enabled === false
       ? null
       : new ContextReviewer({
@@ -113,67 +87,61 @@ export class ContextEngine extends EventEmitter {
   // =========================================================================
 
   /**
-   * Must be called before build(). Idempotent — safe to call multiple times.
-   *
-   * Spawns the Python subprocess, sends `initialize` RPC, and populates the note cache.
+   * Connect to the daemon and register the md_db workspace. Idempotent.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
     const t0 = Date.now();
-    this.debug({ type: "ce_init_start", timestamp: t0, path: "subprocess" });
+    this.debug({ type: "ce_init_start", timestamp: t0, path: "daemon" });
 
-    ensureDir(this.config.dbPath);
+    mkdirSync(this.config.dbPath, { recursive: true });
 
-    await this.ensureSubprocess();
+    await this._ensureClient();
 
-    const result = await this.rpc("initialize", {
-      md_db_path: this.config.mdDbPath,
-      db_dir: this.config.dbPath,
-      top_k: this.config.topK,
-    }) as {
-      path: string;
-      mode: string;
-      degraded_reason: string;
-      duration_ms: number;
-      note_count: number;
-      note_cache: Record<string, string>;
+    // Register the md_db root as a workspace (idempotent — daemon dedupes by root_path)
+    const cgConfig = getConfig();
+    const wsName = "default"; // single-workspace mode
+    const result = await this.client!.rpc("workspaces.register", {
+      name: wsName,
+      root_path: this.config.mdDbPath,
+    }) as { workspace_id: string; existed: boolean; doc_count?: number };
+
+    this.workspaceId = result.workspace_id;
+
+    // Read degradation state from daemon health
+    const health = await this.client!.rpc("daemon.health", {}) as {
+      status: string;
+      workspaces: Array<{ workspace_id: string; state: string }>;
     };
 
-    // Populate note cache
-    this.noteCache.clear();
-    for (const [key, val] of Object.entries(result.note_cache)) {
-      this.noteCache.set(key, val);
-    }
-
-    // Track degradation state
-    this.degraded = result.mode === "degraded";
-    this.degradedReason = result.degraded_reason ?? "";
+    const wsHealth = health.workspaces.find((w) => w.workspace_id === this.workspaceId);
+    this.degraded = wsHealth?.state === "error";
+    this.degradedReason = this.degraded ? "Daemon workspace in error state" : "";
 
     this.initialized = true;
 
     this.debug({
       type: "ce_init_end",
       timestamp: Date.now(),
-      path: result.path,
+      path: result.existed ? "daemon-existing" : "daemon-new",
       durationMs: Date.now() - t0,
-      noteCount: result.note_count,
+      noteCount: result.doc_count ?? 0,
     });
   }
 
   /**
    * Build a ContextPackage for the given prompt.
-   * Sends `retrieve` RPC → formats context in TS → runs reviewer in TS.
    */
   async build(prompt: string, workspace?: string): Promise<ContextPackage> {
-    this.ensureInitialized();
+    this._ensureInitialized();
 
     const t0 = Date.now();
-
     this.debug({ type: "ce_retrieval_start", timestamp: t0, query: prompt.slice(0, 200), topK: this.config.topK });
 
     const tVector = Date.now();
-    const rpcResult = await this.rpc("retrieve", {
+    const rpcResult = await this.client!.rpc("query.retrieve", {
+      workspace_id: this.workspaceId,
       query: prompt,
       top_k: this.config.topK,
       ...(workspace ? { workspace } : {}),
@@ -184,7 +152,6 @@ export class ContextEngine extends EventEmitter {
 
     this.debug({ type: "ce_vector_done", timestamp: Date.now(), seedCount: seedNotes.length, durationMs: Date.now() - tVector });
 
-    // Short-circuit: nothing came back from RAG
     if (seedNotes.length === 0 && expandedNotes.length === 0) {
       return {
         query: prompt,
@@ -204,10 +171,8 @@ export class ContextEngine extends EventEmitter {
 
     const tGraph = Date.now();
     const allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
-
     this.debug({ type: "ce_graph_done", timestamp: Date.now(), expandedCount: expandedNotes.length, durationMs: Date.now() - tGraph });
 
-    // Format raw context
     const suggestedTools = allNotes
       .filter((n) => n.type === "tool" && n.toolId !== undefined)
       .map((n) => n.toolId!);
@@ -218,7 +183,6 @@ export class ContextEngine extends EventEmitter {
     const filteredExpanded = allNotes.filter((n) => (n.depth ?? 0) > 0 && n.retrievalSource !== "vector");
     const rawFormattedContext = formatContext(filteredSeeds, filteredExpanded);
 
-    // Optional context review / synthesis
     let formattedContext = rawFormattedContext;
     let reviewResult: ContextPackage["reviewResult"] | undefined;
 
@@ -248,7 +212,6 @@ export class ContextEngine extends EventEmitter {
       }
     }
 
-    // Append degradation warning if running without embeddings
     if (this.degraded) {
       formattedContext += "\n\n> Warning: Embedding provider unavailable — using keyword matching. Results may be less precise.";
     }
@@ -279,10 +242,11 @@ export class ContextEngine extends EventEmitter {
     end: string,
     options?: { edgeTypes?: string[]; maxDepth?: number },
   ): Promise<PathResult> {
-    this.ensureInitialized();
+    this._ensureInitialized();
     const t0 = Date.now();
 
-    const rpcResult = await this.rpc("find_path", {
+    const rpcResult = await this.client!.rpc("query.find_path", {
+      workspace_id: this.workspaceId,
       start,
       end,
       ...(options?.edgeTypes ? { edge_types: options.edgeTypes } : {}),
@@ -311,7 +275,6 @@ export class ContextEngine extends EventEmitter {
       ? `<!-- ContextGarden: no graph path found between "${start}" and "${end}" -->`
       : formatPathContext(pathSteps, pathNotes);
 
-    // Run through synthesizer if available
     let reviewResult: PathResult["reviewResult"];
     if (!rpcResult.no_path && this.reviewer && pathNotes.length > 0) {
       const pathQuery = `How does "${start}" connect to "${end}"?`;
@@ -338,117 +301,83 @@ export class ContextEngine extends EventEmitter {
   }
 
   /**
-   * Return the stripped body of a specific note by relative path.
-   * Reads from in-memory cache — no RPC needed.
+   * Get the body of a note by relative path.
+   * Fetches from the daemon — no local cache in Phase 2.
    */
-  getNoteContent(relativePath: string): string | null {
-    return this.noteCache.get(relativePath) ?? null;
+  async getNoteContentAsync(relativePath: string): Promise<string | null> {
+    if (!this.initialized) return null;
+    try {
+      const result = await this.client!.rpc("query.get_note_content", {
+        workspace_id: this.workspaceId,
+        relative_path: relativePath,
+      }) as { body: string | null };
+      return result.body;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Synchronous shim — returns null; use getNoteContentAsync for actual content. */
+  getNoteContent(_relativePath: string): string | null {
+    return null;
   }
 
   /**
-   * Get graph statistics via Python RPC.
+   * Get graph statistics.
    */
   async getGraphStats(): Promise<{ noteCount: number; edgeCount: number; indexLoaded: boolean }> {
-    if (!this.initialized) {
-      return { noteCount: 0, edgeCount: 0, indexLoaded: false };
-    }
-    const result = await this.rpc("get_graph_stats", {}) as {
-      note_count: number;
-      edge_count: number;
-      index_loaded: boolean;
-    };
+    if (!this.initialized) return { noteCount: 0, edgeCount: 0, indexLoaded: false };
+    const result = await this.client!.rpc("query.stats", {
+      workspace_id: this.workspaceId,
+    }) as { doc_count: number; edge_count: number; index_loaded: boolean };
     return {
-      noteCount: result.note_count,
+      noteCount: result.doc_count,
       edgeCount: result.edge_count,
       indexLoaded: result.index_loaded,
     };
   }
 
   /**
-   * Complete reindex via Python RPC. Updates local note cache.
+   * Trigger a full reindex of the workspace.
    */
   async reindex(): Promise<void> {
-    this.ensureInitialized();
-
+    this._ensureInitialized();
     const t0 = Date.now();
+    this.debug({ type: "ce_reindex_start", timestamp: t0, path: "daemon" });
 
-    const result = await this.rpc("reindex", {}) as {
-      skipped: boolean;
-      duration_ms: number;
-      note_count: number;
-      note_cache: Record<string, string>;
-    };
+    await this.client!.rpc("index.rebuild", { workspace_id: this.workspaceId });
 
-    if (result.skipped) {
-      this.debug({ type: "ce_reindex_start", timestamp: t0, path: "skipped" });
-      this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: 0, skipped: true });
-      return;
-    }
-
-    // Update note cache
-    this.noteCache.clear();
-    for (const [key, val] of Object.entries(result.note_cache)) {
-      this.noteCache.set(key, val);
-    }
-
-    this.debug({ type: "ce_reindex_start", timestamp: t0, path: "full" });
-    this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: result.note_count, skipped: false });
+    this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: 0, skipped: false });
   }
 
   /**
-   * Queue an incremental index update. Returns immediately — the Python
-   * background indexer thread does the actual embedding + graph work.
+   * Queue an incremental index update. The daemon's background indexer does the work.
    */
   async incrementalUpdate(changedPaths: string[], deletedPaths: string[] = []): Promise<void> {
-    this.ensureInitialized();
-
-    const result = await this.rpc("incremental_update", {
+    this._ensureInitialized();
+    const result = await this.client!.rpc("index.enqueue", {
+      workspace_id: this.workspaceId,
       changed_paths: changedPaths,
       deleted_paths: deletedPaths,
-    }) as { queued: boolean; queue_depth: number };
+    }) as { job_id: string; queue_depth: number };
 
     this.debug({
       type: "ce_subprocess_log",
       timestamp: Date.now(),
-      message: `Incremental update queued (queue_depth=${result.queue_depth})`,
+      message: `Incremental update enqueued (queue_depth=${result.queue_depth})`,
     });
   }
 
   /**
-   * Close the subprocess and clean up resources.
+   * Disconnect from the daemon. If we spawned it, signals shutdown.
    */
   async close(): Promise<void> {
-    const waitForExit = this.waitForSubprocessExit();
-
-    if (this.subprocess) {
-      try {
-        const id = randomUUID();
-        const line = JSON.stringify({ id, method: "shutdown", params: {} }) + "\n";
-        this.subprocess.stdin?.write(line);
-      } catch {
-        // Subprocess may already be dead
-      }
-
-      try {
-        this.subprocess.kill("SIGTERM");
-      } catch {
-        // Already dead
-      }
+    if (this.client) {
+      await this.client.close();
+      this.client = null;
     }
-
-    await waitForExit;
-
-    // Reject all pending RPCs (if any remain)
-    for (const [id, pending] of this.pendingRpc) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error("ContextEngine closed"));
-    }
-    this.pendingRpc.clear();
-
-    this.subprocess = null;
-    this.rl = null;
     this.initialized = false;
-    this.noteCache.clear();
+    this.workspaceId = null;
   }
 
   // =========================================================================
@@ -464,247 +393,40 @@ export class ContextEngine extends EventEmitter {
   }
 
   // =========================================================================
-  // Subprocess management
+  // Daemon connection
   // =========================================================================
 
-  private async ensureSubprocess(): Promise<void> {
-    if (this.subprocess && !this.subprocess.killed) return;
+  private async _ensureClient(): Promise<void> {
+    if (this.client) return;
 
-    const pythonExe = this.resolvePythonPath();
-    const cwd = dirname(this.config.mdDbPath);
-    this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: `Spawning python in cwd=${cwd}` });
-
-    // Pass embed config as env vars so the Python subprocess picks them up
     const cgConfig = getConfig();
+    const cacheFile = join(this.config.dbPath, "..", ".python_path");
+    const pythonPath = resolvePythonPath(cacheFile);
+    const daemonCwd = dirname(this.config.mdDbPath);
+
     const envOverrides: Record<string, string> = {
+      CG_EMBED_PROVIDER: cgConfig.embedding.provider,
+      CG_EMBED_MODEL: cgConfig.embedding.model,
+      CG_EMBED_HOST: cgConfig.embedding.host,
+      CG_EMBED_CONTEXT_LENGTH: String(cgConfig.embedding.contextLength),
+      // Legacy names for backwards compat
       OBSIDI_EMBED_PROVIDER: cgConfig.embedding.provider,
       OBSIDI_EMBED_MODEL: cgConfig.embedding.model,
       OBSIDI_EMBED_HOST: cgConfig.embedding.host,
-      OBSIDI_EMBED_CONTEXT_LENGTH: String(cgConfig.embedding.contextLength),
     };
     if (cgConfig.embedding.apiKey) {
       envOverrides["OPENAI_API_KEY"] = cgConfig.embedding.apiKey;
     }
 
-    const proc = spawn(pythonExe, ["-m", "graph"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd,
-      env: { ...process.env, ...envOverrides },
-    });
-
-    this.subprocessExitPromise = new Promise<void>((resolve) => {
-      this.resolveSubprocessExit = resolve;
-    });
-
-    this.subprocess = proc;
-
-    const stderrLines: string[] = [];
-
-    this.rl = createInterface({ input: proc.stdout! });
-    this.rl.on("line", (line: string) => {
-      this.handleResponse(line);
-    });
-
-    const stderrRl = createInterface({ input: proc.stderr! });
-    stderrRl.on("line", (line: string) => {
-      stderrLines.push(line);
-      if (stderrLines.length > 50) stderrLines.shift();
-      this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: line });
-    });
-
-    proc.on("exit", (code, signal) => {
-      this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: `Python subprocess exited (code=${code}, signal=${signal})` });
-      this.subprocess = null;
-      this.rl = null;
-      this.initialized = false;
-
-      const stderrSummary = stderrLines.length > 0
-        ? `\nPython stderr:\n${stderrLines.join("\n")}`
-        : "";
-
-      for (const [id, pending] of this.pendingRpc) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error(`Python subprocess exited (code=${code})${stderrSummary}`));
-      }
-      this.pendingRpc.clear();
-
-      this.resolveSubprocessExit?.();
-      this.resolveSubprocessExit = null;
-      this.subprocessExitPromise = null;
-    });
-
-    const STARTUP_TIMEOUT_MS = 2000;
-    const started = await new Promise<boolean>((resolve) => {
-      let elapsed = 0;
-      const poll = setInterval(() => {
-        elapsed += 50;
-        if (!this.subprocess) { clearInterval(poll); resolve(false); return; }
-        if (this.subprocess.stdin?.writable) { clearInterval(poll); resolve(true); return; }
-        if (elapsed >= STARTUP_TIMEOUT_MS) { clearInterval(poll); resolve(false); }
-      }, 50);
-    });
-
-    if (!started) {
-      const stderrSummary = stderrLines.length > 0
-        ? `\nPython stderr:\n${stderrLines.join("\n")}`
-        : "\n(no stderr captured — process may have exited before writing anything)";
-      throw new Error(
-        `Python graph subprocess failed to start (exe: ${pythonExe}).` +
-        `\nVerify the conda env exists: conda env create -f graph/environment.yml` +
-        stderrSummary,
-      );
-    }
-  }
-
-  private async waitForSubprocessExit(timeoutMs = 2000): Promise<void> {
-    const exitPromise = this.subprocessExitPromise;
-    if (!exitPromise) return;
-
-    await Promise.race([
-      exitPromise.catch(() => {}),
-      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-    ]);
-  }
-
-  /**
-   * Resolve the Python executable path for the contextgarden conda environment.
-   * Uses direct path (no conda run — conda run doesn't forward stdin on Windows).
-   *
-   * Caches the resolved path to `.context-garden/.python_path`.
-   */
-  private resolvePythonPath(): string {
-    if (this.pythonPath) return this.pythonPath;
-
-    // Check cache file first
-    const cacheFile = join(this.config.dbPath, "..", ".python_path");
-    try {
-      const cached = readFileSync(cacheFile, "utf-8").trim();
-      if (cached && existsSync(cached)) {
-        this.pythonPath = cached;
-        return cached;
-      }
-    } catch {
-      // No cache or stale — fall through to search
-    }
-
-    const resolved = this.searchPythonPath();
-
-    // Persist for next startup
-    try {
-      writeFileSync(cacheFile, resolved, "utf-8");
-    } catch {
-      // Non-fatal
-    }
-
-    this.pythonPath = resolved;
-    return resolved;
-  }
-
-  private searchPythonPath(): string {
-    const home = process.env["USERPROFILE"] ?? process.env["HOME"] ?? "";
-    const condaDirs = [
-      process.env["CONDA_PREFIX"] ? dirname(process.env["CONDA_PREFIX"]) : "",
-      join(home, "miniconda3", "envs"),
-      join(home, "anaconda3", "envs"),
-      join(home, ".conda", "envs"),
-    ].filter(Boolean);
-
-    for (const base of condaDirs) {
-      // Windows
-      const winPath = join(base, "contextgarden", "python.exe");
-      if (existsSync(winPath)) return winPath;
-      // Unix
-      const unixPath = join(base, "contextgarden", "bin", "python");
-      if (existsSync(unixPath)) return unixPath;
-    }
-
-    // Fall back: ask conda for the path
-    try {
-      const result = execSync(
-        'conda run -n contextgarden python -c "import sys; print(sys.executable)"',
-        { encoding: "utf-8", timeout: 15_000 },
-      ).trim();
-      if (result && existsSync(result)) return result;
-    } catch {
-      // conda not available or env not found
-    }
-
-    throw new Error(
-      "Could not find Python for conda env 'contextgarden'. " +
-      "Ensure the environment exists: conda env create -f graph/environment.yml"
-    );
-  }
-
-  // =========================================================================
-  // JSON-RPC
-  // =========================================================================
-
-  private async rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
-    await this.ensureSubprocess();
-
-    if (!this.subprocess?.stdin?.writable) {
-      throw new Error(
-        "Python subprocess stdin not writable — subprocess may have crashed. " +
-        "Check ce_subprocess_log debug events or run: conda run -n contextgarden python -m graph"
-      );
-    }
-
-    const id = randomUUID();
-    const line = JSON.stringify({ id, method, params }) + "\n";
-
-    return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRpc.delete(id);
-        reject(new Error(`RPC timeout: ${method} (${RPC_TIMEOUT_MS}ms)`));
-      }, RPC_TIMEOUT_MS);
-
-      this.pendingRpc.set(id, { resolve, reject, timer });
-
-      this.subprocess!.stdin!.write(line, (err) => {
-        if (err) {
-          clearTimeout(timer);
-          this.pendingRpc.delete(id);
-          reject(new Error(`Failed to write to subprocess: ${err.message}`));
-        }
-      });
-    });
-  }
-
-  private handleResponse(line: string): void {
-    let data: { id?: string; result?: unknown; error?: { code: number; message: string } };
-    try {
-      data = JSON.parse(line);
-    } catch {
-      this.debug({ type: "ce_subprocess_log", timestamp: Date.now(), message: `Non-JSON from subprocess: ${line.slice(0, 200)}` });
-      return;
-    }
-
-    if (!data.id) {
-      const n = data as Record<string, unknown>;
-      if (n["type"] === "index_progress") {
-        this.emit("indexProgress", n["done"] as number, n["total"] as number);
-      }
-      return;
-    }
-
-    const pending = this.pendingRpc.get(data.id);
-    if (!pending) return;
-
-    clearTimeout(pending.timer);
-    this.pendingRpc.delete(data.id);
-
-    if (data.error) {
-      pending.reject(new Error(`RPC error (${data.error.code}): ${data.error.message}`));
-    } else {
-      pending.resolve(data.result);
-    }
+    this.client = new DaemonClient(pythonPath, daemonCwd, envOverrides);
+    await this.client.connect();
   }
 
   // =========================================================================
   // Helpers
   // =========================================================================
 
-  private ensureInitialized(): void {
+  private _ensureInitialized(): void {
     if (!this.initialized) {
       throw new Error("ContextEngine not initialized. Call initialize() first.");
     }
@@ -716,7 +438,7 @@ export class ContextEngine extends EventEmitter {
 }
 
 // ---------------------------------------------------------------------------
-// RPC note type (matches Python server output)
+// RPC note type (matches Python daemon output)
 // ---------------------------------------------------------------------------
 
 interface RpcRetrievedNote {
@@ -750,7 +472,7 @@ function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
 }
 
 // ---------------------------------------------------------------------------
-// Context formatting — tier-aware
+// Context formatting — tier-aware (unchanged from Phase 1)
 // ---------------------------------------------------------------------------
 
 function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[]): string {
@@ -858,7 +580,7 @@ function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[
 }
 
 // ---------------------------------------------------------------------------
-// formatPathContext — graph path retrieval
+// formatPathContext — graph path retrieval (unchanged)
 // ---------------------------------------------------------------------------
 
 function formatPathContext(pathSteps: PathStep[], pathNotes: RetrievedNote[]): string {
