@@ -59,6 +59,7 @@ DAEMON_PORT = 7432
 MAX_PENDING_JOBS = 50
 DEBOUNCE_SECS = 0.5
 METRICS_INTERVAL_SECS = 300
+RUNTIME_READY_TIMEOUT_SECS = 90.0
 
 DATA_DIR = Path.cwd()
 STATE_DIR = DATA_DIR / ".context-garden"
@@ -366,6 +367,8 @@ class _DaemonServer:
         self._runtimes: dict[str, WorkspaceRuntime] = {}    # id → runtime
         self._observers: dict[str, Any] = {}                # id → watchdog Observer
         self._lock = threading.RLock()
+        self._runtime_ready = threading.Condition(self._lock)
+        self._boot_errors: dict[str, str] = {}
         self._start_time = time.monotonic()
 
     # ── Registry persistence ─────────────────────────────────────────────
@@ -438,23 +441,52 @@ class _DaemonServer:
         """Initialize all registered workspaces (called on daemon startup)."""
         failures: list[str] = []
         with self._lock:
-            for workspace_id, record in list(self._workspaces.items()):
-                if not os.path.isdir(record.root_path):
-                    log.warning(
-                        "Workspace '%s' root_path does not exist: %s - skipping",
-                        record.name, record.root_path,
+            records = list(self._workspaces.items())
+
+        for workspace_id, record in records:
+            if not os.path.isdir(record.root_path):
+                log.warning(
+                    "Workspace '%s' root_path does not exist: %s - skipping",
+                    record.name, record.root_path,
+                )
+                with self._runtime_ready:
+                    self._boot_errors[workspace_id] = (
+                        f"Workspace root_path does not exist: {record.root_path}"
                     )
+                    self._runtime_ready.notify_all()
+                continue
+
+            with self._lock:
+                if workspace_id in self._runtimes:
                     continue
-                try:
-                    log.info("Booting workspace '%s' (%s)...", record.name, record.root_path)
-                    runtime = self._init_engine(record)
+                self._boot_errors.pop(workspace_id, None)
+
+            try:
+                log.info("Booting workspace '%s' (%s)...", record.name, record.root_path)
+                runtime = self._init_engine(record)
+
+                with self._lock:
+                    if workspace_id not in self._workspaces:
+                        log.info(
+                            "Workspace '%s' was removed while booting - discarding runtime",
+                            record.name,
+                        )
+                        continue
+                    if workspace_id in self._runtimes:
+                        continue
                     self._runtimes[workspace_id] = runtime
-                    _ensure_index_thread(runtime)
-                    self._start_observer(runtime)
-                    log.info("Workspace '%s' ready - %d docs", record.name, runtime.doc_count)
-                except Exception as exc:
-                    log.error("Failed to boot workspace '%s': %s", record.name, exc)
-                    failures.append(f"{record.name}: {exc}")
+                    self._boot_errors.pop(workspace_id, None)
+                    self._runtime_ready.notify_all()
+
+                _ensure_index_thread(runtime)
+                self._start_observer(runtime)
+                log.info("Workspace '%s' ready - %d docs", record.name, runtime.doc_count)
+            except Exception as exc:
+                log.error("Failed to boot workspace '%s': %s", record.name, exc)
+                failures.append(f"{record.name}: {exc}")
+                with self._runtime_ready:
+                    self._boot_errors[workspace_id] = str(exc)
+                    self._runtime_ready.notify_all()
 
         if failures:
             raise RuntimeError("Failed to boot one or more workspaces: " + "; ".join(failures))
@@ -493,6 +525,8 @@ class _DaemonServer:
             runtime = self._init_engine(record)
             with self._lock:
                 self._runtimes[workspace_id] = runtime
+                self._boot_errors.pop(workspace_id, None)
+                self._runtime_ready.notify_all()
             _ensure_index_thread(runtime)
             self._start_observer(runtime)
             log.info("Workspace '%s' registered — %d docs", name, runtime.doc_count)
@@ -501,7 +535,9 @@ class _DaemonServer:
             # Roll back
             with self._lock:
                 self._workspaces.pop(workspace_id, None)
+                self._boot_errors.pop(workspace_id, None)
                 self._save_registry()
+                self._runtime_ready.notify_all()
             raise RuntimeError(f"Engine initialization failed: {exc}") from exc
 
     def handle_workspaces_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -522,8 +558,21 @@ class _DaemonServer:
             return {"workspaces": result}
 
     def handle_workspaces_unregister(self, params: dict[str, Any]) -> dict[str, Any]:
-        workspace_id = params["workspace_id"]
+        workspace_id = params.get("workspace_id")
+        name = params.get("name")
         delete_data = params.get("delete_data", False)
+
+        # Allow lookup by name when workspace_id (UUID) is not provided
+        if not workspace_id and name:
+            with self._lock:
+                for wid, rec in self._workspaces.items():
+                    if rec.name == name:
+                        workspace_id = wid
+                        break
+            if not workspace_id:
+                raise KeyError(f"Workspace not found: {name}")
+        elif not workspace_id:
+            raise ValueError("workspace_id or name is required")
 
         with self._lock:
             if workspace_id not in self._workspaces:
@@ -538,7 +587,9 @@ class _DaemonServer:
                 _stop_index_thread(rt)
 
             self._workspaces.pop(workspace_id)
+            self._boot_errors.pop(workspace_id, None)
             self._save_registry()
+            self._runtime_ready.notify_all()
 
         if delete_data:
             data_path = STATE_DIR / "knowledge_graph" / workspace_id
@@ -578,24 +629,33 @@ class _DaemonServer:
         )
 
     def handle_index_rebuild(self, params: dict[str, Any]) -> dict[str, Any]:
-        workspace_id = params["workspace_id"]
+        workspace_id = params.get("workspace_id")
         with self._lock:
-            rt = self._runtimes.get(workspace_id)
-        if not rt:
-            raise KeyError(f"Workspace not initialized: {workspace_id}")
+            if workspace_id:
+                targets = [self._runtimes[workspace_id]] if workspace_id in self._runtimes else []
+            else:
+                targets = list(self._runtimes.values())
+        if not targets:
+            raise KeyError(
+                f"Workspace not initialized: {workspace_id}" if workspace_id
+                else "No initialized workspaces to rebuild"
+            )
 
         job_id = str(uuid.uuid4())
-        rt.state = "indexing"
-        try:
-            with rt._engine_lock:
-                rt.engine.reindex()
-                rt.last_indexed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        except Exception as exc:
-            log.error("Workspace '%s': reindex failed: %s", rt.record.name, exc)
-            raise
-        finally:
-            rt.state = "idle"
-        return {"job_id": job_id, "doc_count": rt.doc_count}
+        total_docs = 0
+        for rt in targets:
+            rt.state = "indexing"
+            try:
+                with rt._engine_lock:
+                    rt.engine.reindex()
+                    rt.last_indexed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                total_docs += rt.doc_count
+            except Exception as exc:
+                log.error("Workspace '%s': reindex failed: %s", rt.record.name, exc)
+                raise
+            finally:
+                rt.state = "idle"
+        return {"job_id": job_id, "doc_count": total_docs}
 
     def handle_index_pause(self, params: dict[str, Any]) -> dict[str, Any]:
         workspace_id = params.get("workspace_id")
@@ -623,25 +683,83 @@ class _DaemonServer:
             rt.state = "idle"
         return {"ok": True, "resumed": [rt.record.workspace_id for rt in targets]}
 
-    def _get_runtime(self, params: dict[str, Any]) -> Optional[WorkspaceRuntime]:
-        """Resolve workspace_id from params; None if not specified and there's exactly one workspace."""
-        workspace_id = params.get("workspace_id")
-        with self._lock:
-            if workspace_id:
-                return self._runtimes.get(workspace_id)
-            # Implicit: use the only workspace if there's exactly one
-            if len(self._runtimes) == 1:
-                return next(iter(self._runtimes.values()))
-        return None
+    def _get_runtime(
+        self,
+        params: dict[str, Any],
+        *,
+        wait_secs: float = 0.0,
+    ) -> Optional[WorkspaceRuntime]:
+        """Resolve workspace_id, optionally waiting for background boot to finish."""
+        deadline = time.monotonic() + wait_secs
+
+        with self._runtime_ready:
+            while True:
+                workspace_id = params.get("workspace_id")
+                if workspace_id:
+                    rt = self._runtimes.get(workspace_id)
+                    if rt:
+                        return rt
+                    if workspace_id not in self._workspaces:
+                        return None
+                    if workspace_id in self._boot_errors:
+                        raise RuntimeError(
+                            f"Workspace failed to initialize: {self._boot_errors[workspace_id]}"
+                        )
+                else:
+                    # Implicit: use the only workspace if there's exactly one.
+                    if len(self._runtimes) == 1:
+                        return next(iter(self._runtimes.values()))
+                    if len(self._runtimes) > 1:
+                        return None  # caller must fan-out across all workspaces
+                    if len(self._workspaces) == 1:
+                        only_id = next(iter(self._workspaces.keys()))
+                        if only_id in self._boot_errors:
+                            raise RuntimeError(
+                                f"Workspace failed to initialize: {self._boot_errors[only_id]}"
+                            )
+                    elif len(self._workspaces) == 0:
+                        return None
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._runtime_ready.wait(timeout=min(0.5, remaining))
 
     def handle_query_retrieve(self, params: dict[str, Any]) -> dict[str, Any]:
-        rt = self._get_runtime(params)
-        if not rt:
-            raise RuntimeError("No workspace available for query. Register a workspace first.")
         workspace_filter = params.get("workspace")  # frontmatter workspace field filter
         top_k = params.get("top_k")
         query = params["query"]
 
+        # Multi-workspace fan-out: when no workspace_id is specified and multiple
+        # workspaces are registered, search all and merge by score.
+        if not params.get("workspace_id"):
+            with self._lock:
+                runtimes = list(self._runtimes.values())
+            if len(runtimes) > 1:
+                all_seeds: list[dict] = []
+                all_expanded: list[dict] = []
+                for rt in runtimes:
+                    with rt._engine_lock:
+                        res = rt.engine.retrieve(query=query, top_k=top_k, workspace=workspace_filter)
+                    all_seeds.extend(res.get("seed_notes", []))
+                    all_expanded.extend(res.get("expanded_notes", []))
+
+                def _dedup_by_score(notes: list[dict]) -> list[dict]:
+                    seen: dict[str, dict] = {}
+                    for n in notes:
+                        nid = n.get("noteId", "")
+                        if nid not in seen or n.get("score", 0) > seen[nid].get("score", 0):
+                            seen[nid] = n
+                    return sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)
+
+                return {
+                    "seed_notes": _dedup_by_score(all_seeds),
+                    "expanded_notes": _dedup_by_score(all_expanded),
+                }
+
+        rt = self._get_runtime(params, wait_secs=RUNTIME_READY_TIMEOUT_SECS)
+        if not rt:
+            raise RuntimeError("Workspace is still initializing; try again shortly.")
         with rt._engine_lock:
             result = rt.engine.retrieve(
                 query=query,
@@ -651,9 +769,9 @@ class _DaemonServer:
         return result
 
     def handle_query_find_path(self, params: dict[str, Any]) -> dict[str, Any]:
-        rt = self._get_runtime(params)
+        rt = self._get_runtime(params, wait_secs=RUNTIME_READY_TIMEOUT_SECS)
         if not rt:
-            raise RuntimeError("No workspace available for query. Register a workspace first.")
+            raise RuntimeError("Workspace is still initializing; try again shortly.")
         with rt._engine_lock:
             return rt.engine.find_path(
                 start_query=params["start"],
@@ -861,6 +979,13 @@ async def _periodic_metrics() -> None:
             log.debug("Metrics snapshot failed: %s", exc)
 
 
+async def _boot_workspaces_in_background() -> None:
+    try:
+        await asyncio.to_thread(_daemon.boot_workspaces)
+    except Exception as exc:
+        log.error("Background workspace boot failed: %s", exc)
+
+
 def _is_addr_in_use(exc: OSError) -> bool:
     return getattr(exc, "winerror", None) == 10048 or getattr(exc, "errno", None) in (48, 98)
 
@@ -1013,6 +1138,7 @@ async def _run_server() -> None:
     log.info("ContextGarden daemon listening on %s", addrs)
 
     asyncio.ensure_future(_periodic_metrics())
+    asyncio.create_task(_boot_workspaces_in_background())
 
     async with server:
         await _shutdown_event.wait()
@@ -1035,7 +1161,6 @@ def main(data_dir: Optional[str] = None) -> None:
     _restart_existing_daemon_if_needed()
 
     _daemon.load_registry()
-    _daemon.boot_workspaces()
 
     try:
         asyncio.run(_run_server())

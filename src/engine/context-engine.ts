@@ -46,7 +46,7 @@ const NOTHING_FOUND_CONTEXT =
 
 export class ContextEngine extends EventEmitter {
   private client: DaemonClient | null = null;
-  private workspaceId: string | null = null;
+  private daemonWorkspaceIds = new Map<string, string>(); // name → daemon UUID
   private initialized = false;
 
   private readonly config: Required<Omit<ContextEngineConfig, "review" | "onDebug">> & {
@@ -83,7 +83,9 @@ export class ContextEngine extends EventEmitter {
   // =========================================================================
 
   /**
-   * Connect to the daemon and register the md_db workspace. Idempotent.
+   * Connect to the daemon. Idempotent. Workspaces are registered separately
+   * via registerDaemonWorkspace() — called by stack.ts on startup and by the
+   * MCP register_workspace tool when new workspaces are added.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -95,24 +97,42 @@ export class ContextEngine extends EventEmitter {
 
     await this._ensureClient();
 
-    // Register the md_db root as a workspace (idempotent — daemon dedupes by root_path)
-    const wsName = "default"; // single-workspace mode
-    const result = await this.client!.rpc("workspaces.register", {
-      name: wsName,
-      root_path: this.config.mdDbPath,
-    }) as { workspace_id: string; existed: boolean; doc_count?: number };
-
-    this.workspaceId = result.workspace_id;
-
     this.initialized = true;
 
     this.debug({
       type: "ce_init_end",
       timestamp: Date.now(),
-      path: result.existed ? "daemon-existing" : "daemon-new",
+      path: "daemon-connected",
       durationMs: Date.now() - t0,
-      noteCount: result.doc_count ?? 0,
+      noteCount: 0,
     });
+  }
+
+  /**
+   * Register a workspace with the daemon (idempotent — daemon dedupes by root_path).
+   * root_path should be the mirror dir: md_db/code/<name>/
+   */
+  async registerDaemonWorkspace(name: string, rootPath: string): Promise<string> {
+    if (!this.initialized) await this.initialize();
+    const result = await this.client!.rpc("workspaces.register", {
+      name,
+      root_path: rootPath,
+    }) as { workspace_id: string; existed: boolean; doc_count?: number };
+    this.daemonWorkspaceIds.set(name, result.workspace_id);
+    return result.workspace_id;
+  }
+
+  /**
+   * Unregister a workspace from the daemon by name.
+   */
+  async unregisterDaemonWorkspace(name: string): Promise<void> {
+    if (!this.initialized) return;
+    try {
+      await this.client!.rpc("workspaces.unregister", { name });
+      this.daemonWorkspaceIds.delete(name);
+    } catch (err) {
+      process.stderr.write(`[context-engine] Failed to unregister daemon workspace "${name}": ${err}\n`);
+    }
   }
 
   /**
@@ -132,7 +152,6 @@ export class ContextEngine extends EventEmitter {
 
     const tVector = Date.now();
     const rpcResult = await this.client!.rpc("query.retrieve", {
-      workspace_id: this.workspaceId,
       query: vectorQuery,
       top_k: this.config.topK,
       ...(workspace ? { workspace } : {}),
@@ -236,7 +255,6 @@ export class ContextEngine extends EventEmitter {
     const t0 = Date.now();
 
     const rpcResult = await this.client!.rpc("query.find_path", {
-      workspace_id: this.workspaceId,
       start,
       end,
       ...(options?.edgeTypes ? { edge_types: options.edgeTypes } : {}),
@@ -298,7 +316,6 @@ export class ContextEngine extends EventEmitter {
     if (!this.initialized) return null;
     try {
       const result = await this.client!.rpc("query.get_note_content", {
-        workspace_id: this.workspaceId,
         relative_path: relativePath,
       }) as { body: string | null };
       return result.body;
@@ -318,7 +335,6 @@ export class ContextEngine extends EventEmitter {
   async getGraphStats(): Promise<{ noteCount: number; edgeCount: number; indexLoaded: boolean }> {
     if (!this.initialized) return { noteCount: 0, edgeCount: 0, indexLoaded: false };
     const result = await this.client!.rpc("query.stats", {
-      workspace_id: this.workspaceId,
     }) as { doc_count: number; edge_count: number; index_loaded: boolean };
     return {
       noteCount: result.doc_count,
@@ -328,25 +344,39 @@ export class ContextEngine extends EventEmitter {
   }
 
   /**
-   * Trigger a full reindex of the workspace.
+   * Trigger a full reindex of all registered daemon workspaces.
    */
   async reindex(): Promise<void> {
     this._ensureInitialized();
     const t0 = Date.now();
     this.debug({ type: "ce_reindex_start", timestamp: t0, path: "daemon" });
 
-    await this.client!.rpc("index.rebuild", { workspace_id: this.workspaceId });
+    await this.client!.rpc("index.rebuild", {});
 
     this.debug({ type: "ce_reindex_done", timestamp: Date.now(), durationMs: Date.now() - t0, noteCount: 0, skipped: false });
   }
 
   /**
-   * Queue an incremental index update. The daemon's background indexer does the work.
+   * Trigger a reindex of a single named workspace.
    */
-  async incrementalUpdate(changedPaths: string[], deletedPaths: string[] = []): Promise<void> {
+  async reindexWorkspace(name: string): Promise<void> {
     this._ensureInitialized();
+    const workspaceId = this.daemonWorkspaceIds.get(name);
+    if (!workspaceId) return;
+    await this.client!.rpc("index.rebuild", { workspace_id: workspaceId });
+  }
+
+  /**
+   * Queue an incremental index update for a named workspace.
+   * The daemon's Python watchdog handles most incremental updates automatically;
+   * call this only when you need to explicitly enqueue specific path changes.
+   */
+  async incrementalUpdate(changedPaths: string[], deletedPaths: string[] = [], workspaceName?: string): Promise<void> {
+    this._ensureInitialized();
+    const workspaceId = workspaceName ? this.daemonWorkspaceIds.get(workspaceName) : undefined;
+    if (workspaceName && !workspaceId) return; // workspace not known to daemon yet
     const result = await this.client!.rpc("index.enqueue", {
-      workspace_id: this.workspaceId,
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
       changed_paths: changedPaths,
       deleted_paths: deletedPaths,
     }) as { job_id: string; queue_depth: number };
@@ -367,7 +397,7 @@ export class ContextEngine extends EventEmitter {
       this.client = null;
     }
     this.initialized = false;
-    this.workspaceId = null;
+    this.daemonWorkspaceIds.clear();
   }
 
   // =========================================================================

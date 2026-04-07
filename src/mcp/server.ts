@@ -193,13 +193,13 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
           active: true,
         });
 
-        // Full reindex after registration — mirrors ObsidiClaw's behaviour of
-        // scanning all notes after the mirror completes, rather than processing
-        // them one-by-one through incremental_update (which previously lost
-        // tier/parentFile/parentModule fields needed for graph edges).
-        engine.reindex().catch((err) => {
-          onBackgroundError?.("reindex after register_workspace", err);
-        });
+        // Register the mirror dir with the daemon, then reindex just this workspace.
+        const mirrorDir = workspaceRegistry.mirrorDir(entry);
+        engine.registerDaemonWorkspace(entry.name, mirrorDir)
+          .then(() => engine.reindexWorkspace(entry.name))
+          .catch((err) => {
+            onBackgroundError?.("daemon workspace registration after register_workspace", err);
+          });
 
         return {
           content: [{
@@ -262,13 +262,8 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
           return { content: [{ type: "text" as const, text: `Workspace "${name}" not found.` }] };
         }
 
-        if (deletedPaths.length > 0) {
-          try {
-            await engine.incrementalUpdate([], deletedPaths);
-          } catch {
-            // Non-fatal
-          }
-        }
+        // Unregister from daemon — removes its watchdog, index, and registry entry.
+        await engine.unregisterDaemonWorkspace(name);
 
         return {
           content: [{

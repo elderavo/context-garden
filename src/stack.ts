@@ -5,7 +5,7 @@
  */
 
 import { join } from "path";
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { initConfig, resolvePaths, type ContextGardenConfig } from "./config.js";
 import { ContextEngine } from "./engine/context-engine.js";
 import { WorkspaceRegistry } from "./workspace/registry.js";
@@ -48,6 +48,25 @@ export async function createStack(dataDir?: string): Promise<StackComponents> {
     paths.mdDbPath,
   );
   registry.load();
+
+  // Remove the legacy single "default" daemon workspace (whole md_db/) if it
+  // still exists from the old single-workspace design. Per-workspace entries
+  // replace it; leaving it causes duplicate results in fan-out queries.
+  await engine.unregisterDaemonWorkspace("default");
+
+  // Sync TS workspaces → daemon (idempotent; daemon dedupes by root_path).
+  // Each TS workspace mirrors source code into md_db/code/<name>/ — that mirror
+  // dir is what the daemon indexes.
+  for (const entry of registry.list()) {
+    const mirrorDir = registry.mirrorDir(entry);
+    if (existsSync(mirrorDir)) {
+      try {
+        await engine.registerDaemonWorkspace(entry.name, mirrorDir);
+      } catch (err) {
+        process.stderr.write(`[context-garden] Failed to register daemon workspace "${entry.name}": ${err}\n`);
+      }
+    }
+  }
 
   // Start watchers for all active workspaces
   registry.startAllWatchers();
