@@ -70,8 +70,11 @@ export interface RetrievedNote {
 // ---------------------------------------------------------------------------
 
 export interface ContextPackage {
-  /** Original prompt used for retrieval. */
+  /** Original prompt / intent used for synthesis. */
   query: string;
+
+  /** Keyword/embedding terms sent to the vector DB. Equals query if not separately specified. */
+  searchTerms?: string;
 
   /** All retrieved notes, sorted by score descending. */
   retrievedNotes: RetrievedNote[];

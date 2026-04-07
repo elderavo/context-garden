@@ -60,14 +60,15 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
         "practices. Returns markdown-formatted context from the knowledge graph. " +
         "Call this before relying on your own knowledge for any project-specific question.",
       inputSchema: {
-        query: z.string().describe("What to search for in the knowledge base."),
+        query: z.string().describe("Your intent in natural language — what you want to understand or find. Sent to the synthesizer LLM to focus the output."),
+        search_terms: z.string().optional().describe("Keyword/embedding string for vector DB seed retrieval. Omit to use query for both retrieval and synthesis."),
         workspace: z.string().optional().describe("Limit retrieval to a specific registered workspace by name. Omit to search all workspaces."),
         max_chars: z.number().optional().describe("Maximum characters to return (default: 15000)."),
       },
     },
-    async ({ query, workspace, max_chars }) => {
+    async ({ query, search_terms, workspace, max_chars }) => {
       const retrievalId = `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-      const pkg = await engine.build(query, workspace);
+      const pkg = await engine.build(query, workspace, search_terms);
       onContextBuilt?.(pkg);
       const budget = Math.max(500, Math.floor(max_chars ?? DEFAULT_MAX_CHARS));
       let text = pkg.formattedContext.length <= budget

@@ -132,17 +132,23 @@ export class ContextEngine extends EventEmitter {
 
   /**
    * Build a ContextPackage for the given prompt.
+   *
+   * @param prompt      Natural-language intent — sent to the synthesizer LLM.
+   * @param workspace   Optional workspace filter.
+   * @param searchTerms Keyword/embedding string for the vector DB. Defaults to prompt.
    */
-  async build(prompt: string, workspace?: string): Promise<ContextPackage> {
+  async build(prompt: string, workspace?: string, searchTerms?: string): Promise<ContextPackage> {
     this._ensureInitialized();
 
+    const vectorQuery = searchTerms ?? prompt;
+
     const t0 = Date.now();
-    this.debug({ type: "ce_retrieval_start", timestamp: t0, query: prompt.slice(0, 200), topK: this.config.topK });
+    this.debug({ type: "ce_retrieval_start", timestamp: t0, query: vectorQuery.slice(0, 200), intent: prompt.slice(0, 200), topK: this.config.topK });
 
     const tVector = Date.now();
     const rpcResult = await this.client!.rpc("query.retrieve", {
       workspace_id: this.workspaceId,
-      query: prompt,
+      query: vectorQuery,
       top_k: this.config.topK,
       ...(workspace ? { workspace } : {}),
     }) as { seed_notes: RpcRetrievedNote[]; expanded_notes: RpcRetrievedNote[] };
@@ -155,6 +161,7 @@ export class ContextEngine extends EventEmitter {
     if (seedNotes.length === 0 && expandedNotes.length === 0) {
       return {
         query: prompt,
+        ...(searchTerms ? { searchTerms } : {}),
         retrievedNotes: [],
         suggestedTools: [],
         formattedContext: NOTHING_FOUND_CONTEXT,
@@ -220,6 +227,7 @@ export class ContextEngine extends EventEmitter {
 
     return {
       query: prompt,
+      ...(searchTerms ? { searchTerms } : {}),
       retrievedNotes: allNotes,
       suggestedTools,
       formattedContext,
