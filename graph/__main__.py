@@ -21,13 +21,18 @@ def main() -> None:
     parser.add_argument(
         "--daemon",
         action="store_true",
-        help="Run as a persistent TCP daemon (port CG_DAEMON_PORT, default 7432)",
+        help="Run as a persistent TCP daemon on 127.0.0.1:7432",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="Canonical data directory root (default: current working directory)",
     )
     args = parser.parse_args()
 
     if args.daemon:
         from .daemon import main as daemon_main
-        daemon_main()
+        daemon_main(data_dir=args.data_dir)
     else:
         run_server(standalone=args.standalone)
 

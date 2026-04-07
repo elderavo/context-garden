@@ -2,8 +2,8 @@
  * DaemonClient — JSON-RPC over TCP to the Python ContextGarden daemon.
  *
  * On connect():
- *   1. Probe daemon.health() on CG_DAEMON_PORT (default 7432).
- *   2. If unreachable, spawn `python -m graph.daemon` and wait up to 10s.
+ *   1. On first connect in this process, start `python -m graph.daemon --data-dir <dir>`.
+ *   2. Daemon startup is restart-safe: existing daemon is shutdown/rotated by Python.
  *   3. Maintain one persistent TCP connection.
  *   4. On disconnect, retry with exponential backoff (max 30s).
  */
@@ -14,7 +14,7 @@ import { randomUUID } from "crypto";
 import { execSync, spawn, type ChildProcess } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 
-const DAEMON_PORT = parseInt(process.env["CG_DAEMON_PORT"] ?? "7432", 10);
+const DAEMON_PORT = 7432;
 const CONNECT_TIMEOUT_MS = 5_000;
 const SPAWN_WAIT_MS = 10_000;
 const SPAWN_PROBE_INTERVAL_MS = 500;
@@ -35,11 +35,12 @@ export class DaemonClient {
   private connected = false;
   private reconnectDelay = 1_000;
   private shuttingDown = false;
+  private startedThisSession = false;
 
   constructor(
     private readonly pythonPath: string,
     private readonly daemonCwd: string,
-    private readonly envOverrides: Record<string, string> = {},
+    private readonly dataDir: string,
   ) {}
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -51,10 +52,16 @@ export class DaemonClient {
   async connect(): Promise<void> {
     if (this.connected) return;
 
-    // Try connecting to an already-running daemon
-    const reachable = await this._probe();
-    if (!reachable) {
+    // Explicit startup request semantics: first connect in this process always
+    // issues a daemon start, and Python handles restart-if-running.
+    if (!this.startedThisSession) {
       await this._spawnDaemon();
+      this.startedThisSession = true;
+    } else {
+      const reachable = await this._probe();
+      if (!reachable) {
+        await this._spawnDaemon();
+      }
     }
 
     await this._openSocket();
@@ -154,15 +161,15 @@ export class DaemonClient {
 
   private async _spawnDaemon(): Promise<void> {
     const env: Record<string, string> = {};
-    // Inherit all env vars, then apply overrides
+    // Inherit env for PATH/conda runtime, but daemon config is sourced from
+    // config.json + ~/.context-garden/.env only.
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) env[k] = v;
     }
     // Prevent roaming user-site packages from leaking into the conda interpreter
     env["PYTHONNOUSERSITE"] = "1";
-    Object.assign(env, this.envOverrides);
 
-    const proc = spawn(this.pythonPath, ["-m", "graph.daemon"], {
+    const proc = spawn(this.pythonPath, ["-m", "graph.daemon", "--data-dir", this.dataDir], {
       cwd: this.daemonCwd,
       env,
       stdio: ["ignore", "ignore", "pipe"],

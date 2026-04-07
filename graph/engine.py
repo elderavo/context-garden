@@ -3,9 +3,8 @@
 Owns the vector index, embedding model, graph store, and persistence directory.
 Called by the JSON-RPC server handlers.
 
-Supports graceful degradation:
-  - "full" mode: vector embeddings + graph + keyword (all available)
-  - "degraded" mode: graph + keyword only (embedding provider unavailable or set to "local")
+This engine is fail-fast: embedding/provider initialization errors are surfaced
+as startup failures instead of running in a partial mode.
 """
 
 from __future__ import annotations
@@ -49,10 +48,6 @@ class KnowledgeGraphEngine:
         self.graph_store: Optional[SimplePropertyGraphStore] = None
         self.keyword_retriever: Optional[KeywordRetriever] = None
 
-        # Mode tracking
-        self._mode: str = "degraded"  # "full" | "degraded"
-        self._degraded_reason: str = ""
-
         # Config (set during initialize)
         self.md_db_path: str = ""
         self.db_dir: str = ""
@@ -78,7 +73,7 @@ class KnowledgeGraphEngine:
         top_k: int = 8,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Boot the engine: scan notes, build graph, optionally build vector index.
+        """Boot the engine: scan notes, build graph, and build vector index.
 
         Keyword args (backward compat):
             ollama_host: str — maps to embed config host override
@@ -132,76 +127,32 @@ class KnowledgeGraphEngine:
         Settings.llm = None
 
         if embed_model_obj is None:
-            # provider="local" — no vector index
-            self._mode = "degraded"
-            self._degraded_reason = "Embedding provider set to 'local'"
-            self.embed_model = None
-            self.index = None
-            log.info("Initialized in degraded mode: %s", self._degraded_reason)
+            provider = embed_config.get("provider", "unknown")
+            raise RuntimeError(
+                f"Embedding provider '{provider}' is not supported in strict mode; "
+                "configure a reachable provider with embeddings enabled."
+            )
 
-        elif check_reachable(embed_config):
-            # Provider available — build or load vector index
-            self.embed_model = embed_model_obj
-            Settings.embed_model = embed_model_obj
-
-            # CG_SKIP_INDEX_ON_BOOT=1: defer expensive vector build if no cache exists.
-            # Useful when booting large repos for the first time — start in degraded
-            # mode and let the operator trigger reindex() explicitly.
-            skip_build = os.environ.get("CG_SKIP_INDEX_ON_BOOT", "0") == "1"
-            if skip_build and not self._has_persisted_index():
-                self.index = None
-                self._mode = "degraded"
-                self._degraded_reason = (
-                    "Index build deferred (CG_SKIP_INDEX_ON_BOOT=1) — "
-                    "call reindex() to build the vector index"
-                )
-                log.info(
-                    "CG_SKIP_INDEX_ON_BOOT=1: skipping initial vector index build; "
-                    "start degraded. Run reindex() to build."
-                )
-            else:
-                self._build_or_load_vector_index(notes, notes_by_id, embed_model_obj)
-                self._mode = "full"
-                self._degraded_reason = ""
-
-        else:
-            # Provider configured but unreachable
+        if not check_reachable(embed_config):
             host = embed_config.get("host", "")
-            self.embed_model = embed_model_obj
+            provider = embed_config.get("provider", "unknown")
+            raise RuntimeError(f"Embedding provider '{provider}' unreachable at {host}")
 
-            if self._has_persisted_index():
-                # Try loading cached index (doesn't hit provider until query time)
-                try:
-                    self.index = self._load_vector_index_only(embed_model_obj)
-                    Settings.embed_model = embed_model_obj
-                    self._mode = "degraded"
-                    self._degraded_reason = f"Embedding provider unreachable at {host}; loaded cached index"
-                    log.info("Loaded cached vector index despite unreachable provider")
-                except Exception as exc:
-                    log.warning("Failed to load cached vector index: %s", exc)
-                    self.index = None
-                    self._mode = "degraded"
-                    self._degraded_reason = f"Embedding provider unreachable at {host}"
-            else:
-                self.index = None
-                self._mode = "degraded"
-                self._degraded_reason = f"Embedding provider unreachable at {host}"
-
-            log.info("Initialized in degraded mode: %s", self._degraded_reason)
+        # Provider available - build or load vector index.
+        self.embed_model = embed_model_obj
+        Settings.embed_model = embed_model_obj
+        self._build_or_load_vector_index(notes, notes_by_id, embed_model_obj)
 
         duration_ms = int((time.time() - t0) * 1000)
-        path_type = "full" if self._mode == "full" else "degraded"
         log.info(
-            "Initialized (%s) in %dms — %d notes",
-            path_type,
+            "Initialized (full) in %dms — %d notes",
             duration_ms,
             len(notes),
         )
 
         return {
-            "path": path_type,
-            "mode": self._mode,
-            "degraded_reason": self._degraded_reason,
+            "path": "full",
+            "mode": "full",
             "duration_ms": duration_ms,
             "note_count": len(notes),
             "note_cache": self.note_cache,
@@ -334,18 +285,15 @@ class KnowledgeGraphEngine:
         self.keyword_retriever = KeywordRetriever(notes_by_id)
         self.note_cache = {n.note_id: n.body for n in notes}
 
-        # Rebuild vector index if we have an embedding model
-        if self.embed_model is not None:
-            try:
-                from .indexer import _build_vector_index
-                self.index = _build_vector_index(notes, self.embed_model, self.db_dir, self._embed_context_length)
-                self._mode = "full"
-                self._degraded_reason = ""
-            except Exception as exc:
-                log.warning("Vector index rebuild failed: %s", exc)
-                self.index = None
-                self._mode = "degraded"
-                self._degraded_reason = f"Vector index rebuild failed: {exc}"
+        # Rebuild vector index (required in strict mode)
+        if self.embed_model is None:
+            raise RuntimeError("Embedding model not initialized; cannot rebuild index")
+
+        try:
+            from .indexer import _build_vector_index
+            self.index = _build_vector_index(notes, self.embed_model, self.db_dir, self._embed_context_length)
+        except Exception as exc:
+            raise RuntimeError(f"Vector index rebuild failed: {exc}") from exc
 
         # Update hash
         Path(hash_path).write_text(current_hash)

@@ -47,7 +47,7 @@ def get_embed_config() -> dict[str, Any]:
     """Read embedding config from config.json + ~/.context-garden/.env.
 
     Delegates to graph.config.get_embed_config() which reads the canonical
-    config.json file (CG_DATA_DIR/.context-garden/config.json) and resolves
+    config.json file (<dataDir>/.context-garden/config.json) and resolves
     apiKeyRef secrets from ~/.context-garden/.env.
     """
     from .config import get_embed_config as _from_config
@@ -78,7 +78,11 @@ def check_reachable(config: dict[str, Any], timeout: float = 3.0) -> bool:
 
         elif provider == "openai":
             api_key = config.get("api_key", "")
-            url = "https://api.openai.com/v1/models"
+            host = str(config.get("host", "https://api.openai.com")).rstrip("/")
+            # Normalize to provider root if a full /v1 path was supplied.
+            if host.endswith("/v1"):
+                host = host[:-3]
+            url = f"{host}/v1/models"
             req = urllib.request.Request(url, method="GET")
             if api_key:
                 req.add_header("Authorization", f"Bearer {api_key}")

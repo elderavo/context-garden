@@ -1,4 +1,8 @@
-$Port = if ($env:CG_DAEMON_PORT) { $env:CG_DAEMON_PORT } else { "7432" }
+param(
+    [string]$DataDir = (Get-Location).Path
+)
+
+$Port = 7432
 
 # Send daemon.shutdown RPC directly over TCP
 try {
@@ -29,5 +33,5 @@ while ((Get-Date) -lt $deadline) {
     }
 }
 
-Write-Host "Starting daemon on port $Port..."
-conda run -n contextgarden python -m graph.daemon
+Write-Host "Starting daemon on port $Port (data-dir: $DataDir)..."
+conda run -n contextgarden python -m graph.daemon --data-dir "$DataDir"

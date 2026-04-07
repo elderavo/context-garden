@@ -8,8 +8,7 @@
  * Usage:
  *   npx tsx bin/context-garden.ts [--data-dir <path>]
  *
- * Environment:
- *   CG_DATA_DIR — override data directory (default: cwd)
+ * Data directory defaults to cwd when --data-dir is not provided.
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -23,8 +22,6 @@ async function main(): Promise<void> {
       dataDir = process.argv[++i];
     }
   }
-  dataDir = dataDir ?? process.env["CG_DATA_DIR"];
-
   // Create the full stack
   const stack = await createStack(dataDir);
 

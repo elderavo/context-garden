@@ -49,10 +49,6 @@ export class ContextEngine extends EventEmitter {
   private workspaceId: string | null = null;
   private initialized = false;
 
-  /** True when the Python engine is in degraded mode (no vector embeddings). */
-  private degraded = false;
-  private degradedReason = "";
-
   private readonly config: Required<Omit<ContextEngineConfig, "review" | "onDebug">> & {
     review?: ContextEngineConfig["review"];
   };
@@ -100,7 +96,6 @@ export class ContextEngine extends EventEmitter {
     await this._ensureClient();
 
     // Register the md_db root as a workspace (idempotent — daemon dedupes by root_path)
-    const cgConfig = getConfig();
     const wsName = "default"; // single-workspace mode
     const result = await this.client!.rpc("workspaces.register", {
       name: wsName,
@@ -108,16 +103,6 @@ export class ContextEngine extends EventEmitter {
     }) as { workspace_id: string; existed: boolean; doc_count?: number };
 
     this.workspaceId = result.workspace_id;
-
-    // Read degradation state from daemon health
-    const health = await this.client!.rpc("daemon.health", {}) as {
-      status: string;
-      workspaces: Array<{ workspace_id: string; state: string }>;
-    };
-
-    const wsHealth = health.workspaces.find((w) => w.workspace_id === this.workspaceId);
-    this.degraded = wsHealth?.state === "error";
-    this.degradedReason = this.degraded ? "Daemon workspace in error state" : "";
 
     this.initialized = true;
 
@@ -219,9 +204,6 @@ export class ContextEngine extends EventEmitter {
       }
     }
 
-    if (this.degraded) {
-      formattedContext += "\n\n> Warning: Embedding provider unavailable — using keyword matching. Results may be less precise.";
-    }
 
     const retrievalMs = Date.now() - t0;
 
@@ -389,18 +371,6 @@ export class ContextEngine extends EventEmitter {
   }
 
   // =========================================================================
-  // Degradation state
-  // =========================================================================
-
-  get isDegraded(): boolean {
-    return this.degraded;
-  }
-
-  get degradedReasonMessage(): string {
-    return this.degradedReason;
-  }
-
-  // =========================================================================
   // Daemon connection
   // =========================================================================
 
@@ -412,12 +382,7 @@ export class ContextEngine extends EventEmitter {
     const pythonPath = resolvePythonPath(cacheFile);
     const daemonCwd = dirname(this.config.mdDbPath);
 
-    // Tell the Python daemon where to find config.json
-    const envOverrides: Record<string, string> = {
-      CG_DATA_DIR: cgConfig.dataDir,
-    };
-
-    this.client = new DaemonClient(pythonPath, daemonCwd, envOverrides);
+    this.client = new DaemonClient(pythonPath, daemonCwd, cgConfig.dataDir);
     await this.client.connect();
   }
 

@@ -4,12 +4,12 @@ Replaces the stdio subprocess model. Runs persistently (started at OS login, or
 spawned by the TS gateway as a fallback). Exposes JSON-RPC over localhost TCP.
 
 Architecture
-────────────
-  asyncio TCP server on 127.0.0.1:7432 (CG_DAEMON_PORT)
+------------
+  asyncio TCP server on 127.0.0.1:7432
   Per-workspace KnowledgeGraphEngine instances
   Per-workspace watchdog file watchers (debounced 500 ms, .md files only)
-  Workspace registry persisted to ~/.contextgarden/registry.json (CG_DATA_DIR)
-  Per-workspace index persisted to ~/.contextgarden/<workspace_id>/index/
+  Workspace registry persisted to <dataDir>/.context-garden/registry.json
+  Per-workspace index persisted to <dataDir>/.context-garden/knowledge_graph/<workspace_id>/index/
   file_hashes.json drift detection on boot — only re-embeds changed files
 
 RPC API (v1, newline-delimited JSON)
@@ -40,6 +40,9 @@ import json
 import logging
 import os
 import queue as _queue
+import signal
+import socket
+import subprocess
 import shutil
 import sys
 import threading
@@ -51,19 +54,30 @@ from typing import Any, Optional
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
-DAEMON_PORT = int(os.environ.get("CG_DAEMON_PORT", "7432"))
-DATA_DIR = Path(os.environ.get("CG_DATA_DIR", str(Path.home() / ".contextgarden")))
-MAX_PENDING_JOBS = int(os.environ.get("CG_MAX_PENDING_JOBS", "50"))
+DAEMON_HOST = "127.0.0.1"
+DAEMON_PORT = 7432
+MAX_PENDING_JOBS = 50
 DEBOUNCE_SECS = 0.5
 METRICS_INTERVAL_SECS = 300
 
+DATA_DIR = Path.cwd()
+STATE_DIR = DATA_DIR / ".context-garden"
+REGISTRY_PATH = STATE_DIR / "registry.json"
+
 logging.basicConfig(
     stream=sys.stderr,
-    level=getattr(logging, os.environ.get("CG_LOG_LEVEL", "INFO"), logging.INFO),
+    level=logging.INFO,
     format="[contextgarden] %(levelname)s %(name)s: %(message)s",
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
+
+
+def configure_paths(data_dir: str | Path) -> None:
+    global DATA_DIR, STATE_DIR, REGISTRY_PATH
+    DATA_DIR = Path(data_dir).resolve()
+    STATE_DIR = DATA_DIR / ".context-garden"
+    REGISTRY_PATH = STATE_DIR / "registry.json"
 
 
 # ── Workspace registry ───────────────────────────────────────────────────────
@@ -337,7 +351,10 @@ def _stop_index_thread(runtime: WorkspaceRuntime) -> None:
         try:
             runtime._queue.put_nowait(None)
         except _queue.Full:
-            pass
+            log.warning(
+                "Workspace '%s': failed to enqueue indexer shutdown sentinel (queue still full)",
+                runtime.record.name,
+            )
 
 
 # ── Daemon server state ──────────────────────────────────────────────────────
@@ -354,12 +371,11 @@ class _DaemonServer:
     # ── Registry persistence ─────────────────────────────────────────────
 
     def load_registry(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        reg_path = DATA_DIR / "registry.json"
-        if not reg_path.exists():
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if not REGISTRY_PATH.exists():
             return
         try:
-            data = json.loads(reg_path.read_text("utf-8"))
+            data = json.loads(REGISTRY_PATH.read_text("utf-8"))
             for entry in data:
                 rec = WorkspaceRecord.from_dict(entry)
                 self._workspaces[rec.workspace_id] = rec
@@ -368,14 +384,14 @@ class _DaemonServer:
             log.error("Failed to load registry: %s", exc)
 
     def _save_registry(self) -> None:
-        reg_path = DATA_DIR / "registry.json"
         data = [rec.to_dict() for rec in self._workspaces.values()]
-        reg_path.write_text(json.dumps(data, indent=2), "utf-8")
+        REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        REGISTRY_PATH.write_text(json.dumps(data, indent=2), "utf-8")
 
     # ── Workspace lifecycle ──────────────────────────────────────────────
 
     def _index_dir(self, workspace_id: str) -> str:
-        return str(DATA_DIR / workspace_id / "index")
+        return str(STATE_DIR / "knowledge_graph" / workspace_id / "index")
 
     def _init_engine(self, record: WorkspaceRecord) -> WorkspaceRuntime:
         """Initialize (or load) a KnowledgeGraphEngine for a workspace."""
@@ -420,26 +436,28 @@ class _DaemonServer:
 
     def boot_workspaces(self) -> None:
         """Initialize all registered workspaces (called on daemon startup)."""
+        failures: list[str] = []
         with self._lock:
             for workspace_id, record in list(self._workspaces.items()):
                 if not os.path.isdir(record.root_path):
                     log.warning(
-                        "Workspace '%s' root_path does not exist: %s — skipping",
+                        "Workspace '%s' root_path does not exist: %s - skipping",
                         record.name, record.root_path,
                     )
                     continue
                 try:
-                    log.info("Booting workspace '%s' (%s)…", record.name, record.root_path)
+                    log.info("Booting workspace '%s' (%s)...", record.name, record.root_path)
                     runtime = self._init_engine(record)
                     self._runtimes[workspace_id] = runtime
                     _ensure_index_thread(runtime)
                     self._start_observer(runtime)
-                    log.info(
-                        "Workspace '%s' ready — %d docs", record.name, runtime.doc_count
-                    )
+                    log.info("Workspace '%s' ready - %d docs", record.name, runtime.doc_count)
                 except Exception as exc:
                     log.error("Failed to boot workspace '%s': %s", record.name, exc)
+                    failures.append(f"{record.name}: {exc}")
 
+        if failures:
+            raise RuntimeError("Failed to boot one or more workspaces: " + "; ".join(failures))
     # ── RPC handlers ────────────────────────────────────────────────────
 
     def handle_workspaces_register(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -523,7 +541,7 @@ class _DaemonServer:
             self._save_registry()
 
         if delete_data:
-            data_path = DATA_DIR / workspace_id
+            data_path = STATE_DIR / "knowledge_graph" / workspace_id
             if data_path.exists():
                 shutil.rmtree(data_path, ignore_errors=True)
                 log.info("Deleted workspace data: %s", data_path)
@@ -676,8 +694,8 @@ class _DaemonServer:
         try:
             import psutil
             rss_mb = psutil.Process().memory_info().rss / (1024.0 * 1024.0)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("psutil unavailable for daemon.health memory stats: %s", exc)
 
         with self._lock:
             ws_summary = [
@@ -791,7 +809,8 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             try:
                 writer.write((json.dumps(resp) + "\n").encode("utf-8"))
                 await writer.drain()
-            except Exception:
+            except Exception as exc:
+                log.debug("Client write failed for %s: %s", peer, exc)
                 break
 
             if method == "daemon.shutdown":
@@ -842,58 +861,153 @@ async def _periodic_metrics() -> None:
             log.debug("Metrics snapshot failed: %s", exc)
 
 
-async def _preflight_check() -> bool:
-    """Return True if our daemon is already running on DAEMON_PORT, exit(1) if another process owns it."""
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection("127.0.0.1", DAEMON_PORT), timeout=1.0
-        )
-    except (ConnectionRefusedError, asyncio.TimeoutError, OSError):
-        return False  # Port is free
+def _is_addr_in_use(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) == 10048 or getattr(exc, "errno", None) in (48, 98)
 
-    # Something is listening — probe for our daemon
-    alive = False
+
+def _rpc_request(method: str, params: dict[str, Any], timeout_secs: float = 2.0) -> Optional[dict[str, Any]]:
+    payload = (json.dumps({"id": "lifecycle", "method": method, "params": params}) + "\n").encode("utf-8")
     try:
-        writer.write(
-            (json.dumps({"id": "preflight", "method": "daemon.health", "params": {}}) + "\n").encode()
+        with socket.create_connection((DAEMON_HOST, DAEMON_PORT), timeout=timeout_secs) as sock:
+            sock.settimeout(timeout_secs)
+            sock.sendall(payload)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        line = buf.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
+        if not line:
+            return None
+        parsed = json.loads(line)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception as exc:
+        log.debug("RPC probe failed for %s: %s", method, exc)
+        return None
+
+
+def _port_is_open() -> bool:
+    try:
+        with socket.create_connection((DAEMON_HOST, DAEMON_PORT), timeout=0.6):
+            return True
+    except OSError:
+        return False
+
+
+def _is_contextgarden_daemon() -> bool:
+    response = _rpc_request("daemon.health", {})
+    return bool(response and isinstance(response.get("result"), dict) and response["result"].get("status") == "ok")
+
+
+def _request_existing_shutdown() -> bool:
+    response = _rpc_request("daemon.shutdown", {})
+    return bool(response and isinstance(response.get("result"), dict) and response["result"].get("ok") is True)
+
+
+def _wait_port_free(timeout_secs: float) -> bool:
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        if not _port_is_open():
+            return True
+        time.sleep(0.2)
+    return not _port_is_open()
+
+
+def _find_listener_pid() -> Optional[int]:
+    try:
+        import psutil
+    except Exception as exc:
+        log.warning("psutil unavailable; cannot resolve listener PID for forced restart: %s", exc)
+        return None
+
+    try:
+        for conn in psutil.net_connections(kind="tcp"):
+            laddr = getattr(conn, "laddr", None)
+            if not laddr:
+                continue
+            if getattr(laddr, "ip", None) != DAEMON_HOST:
+                continue
+            if getattr(laddr, "port", None) != DAEMON_PORT:
+                continue
+            if conn.status != "LISTEN":
+                continue
+            if conn.pid:
+                return int(conn.pid)
+    except Exception as exc:
+        log.warning("Failed to inspect listener PID: %s", exc)
+    return None
+
+
+def _force_kill_pid(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
         )
-        await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=2.0)
-        resp = json.loads(line.decode())
-        alive = resp.get("result", {}).get("status") == "ok"
-    except Exception:
-        pass
-    finally:
+        return
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    time.sleep(0.5)
+    if _port_is_open():
         try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            return
 
-    if alive:
-        log.info("ContextGarden daemon already running on port %d — exiting.", DAEMON_PORT)
-        return True
 
-    log.error(
-        "Port %d is in use by a non-daemon process. "
-        "Stop that process or set CG_DAEMON_PORT to a different value.",
-        DAEMON_PORT,
-    )
-    sys.exit(1)
+def _restart_existing_daemon_if_needed() -> None:
+    if not _port_is_open():
+        return
+
+    if not _is_contextgarden_daemon():
+        raise RuntimeError(
+            f"Port {DAEMON_PORT} is already in use by a non-ContextGarden process; refusing to kill it."
+        )
+
+    log.info("Existing daemon detected on %s:%d; requesting graceful shutdown", DAEMON_HOST, DAEMON_PORT)
+    _request_existing_shutdown()
+    if _wait_port_free(10.0):
+        log.info("Existing daemon stopped gracefully")
+        return
+
+    pid = _find_listener_pid()
+    if pid is None:
+        raise RuntimeError(
+            f"Existing daemon did not stop within 10s and listener PID could not be resolved on port {DAEMON_PORT}"
+        )
+
+    log.warning("Existing daemon did not stop within 10s; force killing pid=%d", pid)
+    _force_kill_pid(pid)
+    if not _wait_port_free(5.0):
+        raise RuntimeError(f"Failed to free port {DAEMON_PORT} after force kill")
+    log.info("Forced restart complete; port %d is free", DAEMON_PORT)
 
 
 async def _run_server() -> None:
     global _shutdown_event
     _shutdown_event = asyncio.Event()
 
-    if await _preflight_check():
-        return  # Another daemon instance is already running
-
-    server = await asyncio.start_server(
-        _handle_client,
-        host="127.0.0.1",
-        port=DAEMON_PORT,
-    )
+    try:
+        server = await asyncio.start_server(
+            _handle_client,
+            host=DAEMON_HOST,
+            port=DAEMON_PORT,
+        )
+    except OSError as exc:
+        if not _is_addr_in_use(exc):
+            raise
+        _restart_existing_daemon_if_needed()
+        server = await asyncio.start_server(
+            _handle_client,
+            host=DAEMON_HOST,
+            port=DAEMON_PORT,
+        )
 
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
     log.info("ContextGarden daemon listening on %s", addrs)
@@ -906,29 +1020,19 @@ async def _run_server() -> None:
     log.info("Daemon shutting down")
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
+# Entry point
 
 
-def _sync_port_check() -> bool:
-    """Quick synchronous check: is something already on DAEMON_PORT?"""
-    import socket as _socket
-    try:
-        s = _socket.create_connection(("127.0.0.1", DAEMON_PORT), timeout=1.0)
-        s.close()
-        return True
-    except OSError:
-        return False
+def main(data_dir: Optional[str] = None) -> None:
+    chosen_data_dir = Path(data_dir).resolve() if data_dir else Path.cwd().resolve()
+    configure_paths(chosen_data_dir)
 
+    from .config import set_data_dir
+    set_data_dir(DATA_DIR)
 
-def main() -> None:
     log.info("ContextGarden daemon starting (data_dir=%s, port=%d)", DATA_DIR, DAEMON_PORT)
 
-    # Fast pre-check before expensive workspace boot — avoids wasting time
-    # loading 2000+ notes only to discover the port is already taken.
-    if _sync_port_check():
-        log.info("Port %d is already in use — running full preflight via asyncio.", DAEMON_PORT)
-        asyncio.run(_run_server())
-        return
+    _restart_existing_daemon_if_needed()
 
     _daemon.load_registry()
     _daemon.boot_workspaces()
@@ -940,4 +1044,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run ContextGarden daemon")
+    parser.add_argument(
+        "--data-dir",
+        default=str(Path.cwd()),
+        help="Canonical data directory root (default: current working directory)",
+    )
+    cli_args = parser.parse_args()
+    main(data_dir=cli_args.data_dir)

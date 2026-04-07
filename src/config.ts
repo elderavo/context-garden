@@ -363,7 +363,7 @@ function _resolveRef(ref: string): string | undefined {
   if (!ref.startsWith("env:")) return undefined;
   const varName = ref.slice(4);
   const secrets = _loadDotEnv();
-  return secrets[varName] || process.env[varName] || undefined;
+  return secrets[varName] || undefined;
 }
 
 // ---------------------------------------------------------------------------

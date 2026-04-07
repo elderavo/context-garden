@@ -1,11 +1,11 @@
-"""ContextGarden Python config loader — reads config.json + ~/.context-garden/.env.
+"""ContextGarden Python config loader - reads config.json + ~/.context-garden/.env.
 
 This module is the single source of truth for provider configuration in the
 Python daemon. It replaces the CG_EMBED_* / CG_LLM_* environment variable
 approach in providers.py.
 
 Config file location:
-    <CG_DATA_DIR>/.context-garden/config.json  (CG_DATA_DIR defaults to cwd)
+    <dataDir>/.context-garden/config.json  (dataDir defaults to cwd)
 
 Secrets file location:
     ~/.context-garden/.env
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +69,8 @@ def _load_dotenv(path: Path) -> dict[str, str]:
                 v = v[1:-1]
             secrets[k] = v
     except OSError:
-        pass
+        # Secrets file is optional.
+        return secrets
     return secrets
 
 
@@ -87,13 +87,12 @@ def _resolve_key(
     """Resolve an apiKeyRef or fall back to a raw key.
 
     Preference order:
-      1. env: ref resolved against ~/.context-garden/.env (then os.environ as fallback)
-      2. raw apiKey value in config.json (legacy — warns)
-      3. empty string
+      1. env: ref resolved against ~/.context-garden/.env
+      2. empty string
     """
     if api_key_ref and api_key_ref.startswith("env:"):
         var = api_key_ref[4:]
-        value = secrets.get(var) or os.environ.get(var, "")
+        value = secrets.get(var, "")
         if not value:
             log.warning(
                 "apiKeyRef %r references '%s' but it is not set in ~/.context-garden/.env",
@@ -102,11 +101,10 @@ def _resolve_key(
             )
         return value
     if raw_api_key:
-        log.warning(
-            "config.json contains a raw 'apiKey' — migrate it to ~/.context-garden/.env "
-            "and use 'apiKeyRef: \"env:CG_EMBED_API_KEY\"' (or CG_LLM_API_KEY) instead."
+        raise RuntimeError(
+            "config.json contains a raw 'apiKey'. Hard cutover requires apiKeyRef values "
+            "resolved from ~/.context-garden/.env."
         )
-        return raw_api_key
     return ""
 
 
@@ -125,8 +123,7 @@ def load_config() -> dict[str, Any]:
             "synthesizer": {provider, model, host, context_window, max_tokens, api_key},
         }
     """
-    data_dir = Path(os.environ.get("CG_DATA_DIR", str(Path.cwd())))
-    config_path = data_dir / ".context-garden" / "config.json"
+    config_path = _DATA_DIR / ".context-garden" / "config.json"
     env_file = Path.home() / ".context-garden" / ".env"
 
     secrets = _load_dotenv(env_file)
@@ -137,7 +134,7 @@ def load_config() -> dict[str, Any]:
             raw = json.loads(config_path.read_text("utf-8"))
             log.debug("Loaded config from %s", config_path)
         except Exception as exc:
-            log.warning("Failed to parse %s: %s — using defaults", config_path, exc)
+            log.warning("Failed to parse %s: %s - using defaults", config_path, exc)
     else:
         log.debug("No config.json at %s — using defaults", config_path)
 
@@ -175,6 +172,18 @@ def load_config() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _cached: dict[str, Any] | None = None
+_DATA_DIR: Path = Path.cwd()
+
+
+def set_data_dir(data_dir: str | Path) -> None:
+    """Set canonical data dir used for config resolution."""
+    global _DATA_DIR, _cached
+    _DATA_DIR = Path(data_dir).resolve()
+    _cached = None
+
+
+def get_data_dir() -> Path:
+    return _DATA_DIR
 
 
 def get_embed_config() -> dict[str, Any]:
