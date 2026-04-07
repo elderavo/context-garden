@@ -162,6 +162,55 @@ export class ContextEngine extends EventEmitter {
 
     this.debug({ type: "ce_vector_done", timestamp: Date.now(), seedCount: seedNotes.length, durationMs: Date.now() - tVector });
 
+    // Illuminated paths: find connections between top seeds
+    const pathTraces: PathTrace[] = [];
+    const rawPathNotes: RetrievedNote[] = [];
+    if (seedNotes.length >= 2) {
+      const tPaths = Date.now();
+      const topSeeds = seedNotes.slice(0, 3); // top 3 by score
+      const seedPairs = _pairs(topSeeds);
+
+      const pathResults = await Promise.allSettled(
+        seedPairs.map(([a, b]) =>
+          this.client!.rpc("query.find_path", {
+            start: a.noteId,
+            end: b.noteId,
+          }) as Promise<{
+            start_id: string;
+            end_id: string;
+            path_length: number;
+            no_path: boolean;
+            path_steps: Array<{ nodeId: string; edgeLabel: string; edgeDirection: string; fromNodeId: string }>;
+            path_notes: RpcRetrievedNote[];
+          }>
+        )
+      );
+
+      for (const result of pathResults) {
+        if (
+          result.status === "fulfilled" &&
+          !result.value.no_path &&
+          result.value.path_length > 0
+        ) {
+          rawPathNotes.push(
+            ...result.value.path_notes.map(rpcNoteToRetrievedNote)
+          );
+          pathTraces.push({
+            startId: result.value.start_id,
+            endId: result.value.end_id,
+            steps: result.value.path_steps,
+          });
+        }
+      }
+
+      this.debug({
+        type: "ce_paths_done",
+        timestamp: Date.now(),
+        pathCount: pathTraces.length,
+        durationMs: Date.now() - tPaths,
+      });
+    }
+
     if (seedNotes.length === 0 && expandedNotes.length === 0) {
       return {
         query: prompt,
@@ -181,8 +230,23 @@ export class ContextEngine extends EventEmitter {
     }
 
     const tGraph = Date.now();
-    const allNotes = [...seedNotes, ...expandedNotes].sort((a, b) => b.score - a.score);
-    this.debug({ type: "ce_graph_done", timestamp: Date.now(), expandedCount: expandedNotes.length, durationMs: Date.now() - tGraph });
+    // Merge notes: seeds + path traces + expanded (deduplicate by noteId, highest score wins)
+    const seenIds = new Set(seedNotes.map((n) => n.noteId));
+    const uniquePathNotes = rawPathNotes.filter((n) => {
+      if (seenIds.has(n.noteId)) return false;
+      seenIds.add(n.noteId);
+      return true;
+    });
+    const allNotes = [...seedNotes, ...uniquePathNotes, ...expandedNotes].sort(
+      (a, b) => b.score - a.score
+    );
+    this.debug({
+      type: "ce_graph_done",
+      timestamp: Date.now(),
+      expandedCount: expandedNotes.length,
+      pathNoteCount: uniquePathNotes.length,
+      durationMs: Date.now() - tGraph,
+    });
 
     const suggestedTools = allNotes
       .filter((n) => n.type === "tool" && n.toolId !== undefined)
@@ -192,7 +256,7 @@ export class ContextEngine extends EventEmitter {
 
     const filteredSeeds = allNotes.filter((n) => n.depth === 0 || n.retrievalSource === "vector");
     const filteredExpanded = allNotes.filter((n) => (n.depth ?? 0) > 0 && n.retrievalSource !== "vector");
-    const rawFormattedContext = formatContext(filteredSeeds, filteredExpanded);
+    const rawFormattedContext = formatContext(filteredSeeds, filteredExpanded, pathTraces);
 
     let formattedContext = rawFormattedContext;
     let reviewResult: ContextPackage["reviewResult"] | undefined;
@@ -451,6 +515,12 @@ interface RpcRetrievedNote {
   viaSourceTitle?: string | null;
 }
 
+interface PathTrace {
+  startId: string;
+  endId: string;
+  steps: Array<{ nodeId: string; edgeLabel: string; edgeDirection: string; fromNodeId: string }>;
+}
+
 function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
   return {
     noteId: n.noteId,
@@ -473,6 +543,18 @@ function rpcNoteToRetrievedNote(n: RpcRetrievedNote): RetrievedNote {
 // Context formatting — tier-aware
 // ---------------------------------------------------------------------------
 
+/**
+ * Generate all unique pairs from an array.
+ * [a, b, c] → [[a,b], [a,c], [b,c]]
+ */
+function _pairs<T>(arr: T[]): [T, T][] {
+  const out: [T, T][] = [];
+  for (let i = 0; i < arr.length; i++)
+    for (let j = i + 1; j < arr.length; j++)
+      out.push([arr[i], arr[j]]);
+  return out;
+}
+
 const _EDGE_READABLE: Record<string, string> = {
   CALLS: "calls",
   CONTAINS_SYMBOL: "contains",
@@ -487,7 +569,11 @@ function _edgeArrow(edgeLabel: string): string {
   return `—[${_EDGE_READABLE[edgeLabel] ?? edgeLabel.toLowerCase()}]→`;
 }
 
-function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[]): string {
+function formatContext(
+  seedNotes: RetrievedNote[],
+  expandedNotes: RetrievedNote[],
+  pathTraces?: PathTrace[],
+): string {
   const allNotes = [...seedNotes, ...expandedNotes];
 
   if (allNotes.length === 0) {
@@ -563,6 +649,34 @@ function formatContext(seedNotes: RetrievedNote[], expandedNotes: RetrievedNote[
         const callerMeta = callers.length > 0 ? `called by: ${callers.join(", ")}` : "";
         renderNote(note, kindLabel, callerMeta);
       }
+    }
+  }
+
+  if (pathTraces && pathTraces.length > 0) {
+    lines.push("## Path Traces");
+    lines.push("_How top results connect:_");
+    lines.push("");
+    for (const trace of pathTraces) {
+      const startNote = allNotes.find((n) => n.noteId === trace.startId);
+      const endNote = allNotes.find((n) => n.noteId === trace.endId);
+      const startPath = startNote?.path ?? trace.startId;
+      const endPath = endNote?.path ?? trace.endId;
+
+      lines.push(`**${startPath} → ${endPath}**`);
+
+      // Render the trace as a chain of node connections
+      const traceParts: string[] = [startPath];
+      for (const step of trace.steps) {
+        if (step.edgeLabel) {
+          const arrow = step.edgeDirection === "outgoing" ? "→" : "←";
+          const edgeReadable = _EDGE_READABLE[step.edgeLabel] ?? step.edgeLabel.toLowerCase();
+          traceParts.push(`${arrow}[${edgeReadable}]${arrow}`);
+          const nodePath = allNotes.find((n) => n.noteId === step.nodeId)?.path ?? step.nodeId;
+          traceParts.push(nodePath);
+        }
+      }
+      lines.push(traceParts.join(" "));
+      lines.push("");
     }
   }
 
