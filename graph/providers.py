@@ -1,7 +1,7 @@
 """Provider-agnostic embedding configuration and factory.
 
-Reads CG_EMBED_* environment variables to determine which embedding
-provider to use. Supports ollama, openai, and local (no embeddings).
+Reads config from graph/config.py (config.json + ~/.context-garden/.env).
+Supports ollama, openai, and local (no embeddings).
 
 EmbedProvider Protocol is the public interface for embedding implementations.
 """
@@ -9,7 +9,6 @@ EmbedProvider Protocol is the public interface for embedding implementations.
 from __future__ import annotations
 
 import logging
-import os
 import urllib.request
 import urllib.error
 from typing import Any, Optional, Protocol, runtime_checkable
@@ -45,21 +44,14 @@ class EmbedProvider(Protocol):
 
 
 def get_embed_config() -> dict[str, Any]:
-    """Read embedding config from environment variables with defaults.
+    """Read embedding config from config.json + ~/.context-garden/.env.
 
-    Supports both CG_EMBED_* (canonical) and legacy OBSIDI_EMBED_* names.
-    CG_EMBED_* takes precedence when both are set.
+    Delegates to graph.config.get_embed_config() which reads the canonical
+    config.json file (CG_DATA_DIR/.context-garden/config.json) and resolves
+    apiKeyRef secrets from ~/.context-garden/.env.
     """
-    def _env(cg_key: str, legacy_key: str, default: str) -> str:
-        return os.environ.get(cg_key) or os.environ.get(legacy_key) or default
-
-    return {
-        "provider": _env("CG_EMBED_PROVIDER", "OBSIDI_EMBED_PROVIDER", "ollama"),
-        "model": _env("CG_EMBED_MODEL", "OBSIDI_EMBED_MODEL", "nomic-embed-text:latest"),
-        "host": _env("CG_EMBED_HOST", "OBSIDI_EMBED_HOST", "http://localhost:11434"),
-        "api_key": os.environ.get("OPENAI_API_KEY", ""),
-        "context_length": int(_env("CG_EMBED_CONTEXT_LENGTH", "OBSIDI_EMBED_CONTEXT_LENGTH", "512")),
-    }
+    from .config import get_embed_config as _from_config
+    return _from_config()
 
 
 # ---------------------------------------------------------------------------

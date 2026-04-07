@@ -1,15 +1,26 @@
 /**
  * ContextGarden configuration system.
  *
- * Cascade: defaults → config.json → env vars → MCP `configure` tool (runtime).
+ * Cascade: defaults → config.json (canonical, no env-var override for provider fields).
  *
- * Config file: <dataDir>/.context-garden/config.json
- * Env vars: CG_EMBED_PROVIDER, CG_EMBED_MODEL, CG_EMBED_HOST,
- *           CG_LLM_PROVIDER, CG_LLM_MODEL, CG_LLM_HOST,
- *           OPENAI_API_KEY, ANTHROPIC_API_KEY
+ * Config file:   <dataDir>/.context-garden/config.json
+ * Secrets file:  ~/.context-garden/.env   (KEY=VALUE, one per line)
+ *
+ * API keys are never stored as plaintext in config.json. Instead, config.json
+ * stores a reference:
+ *
+ *   "apiKeyRef": "env:CG_EMBED_API_KEY"
+ *
+ * and the actual value lives in ~/.context-garden/.env:
+ *
+ *   CG_EMBED_API_KEY=sk-...
+ *
+ * Auto-migration: if a legacy raw apiKey is found in config.json on load, it is
+ * silently moved to ~/.context-garden/.env and replaced with an apiKeyRef.
  */
 
 import { join } from "path";
+import { homedir } from "os";
 import { readText, writeText, fileExists, ensureDir } from "./util/fs.js";
 
 // ---------------------------------------------------------------------------
@@ -23,7 +34,10 @@ export interface EmbedConfig {
   provider: EmbedProvider;
   model: string;
   host: string;
+  /** Resolved API key (for runtime use — never persisted). */
   apiKey?: string;
+  /** Ref to the env var holding the secret, e.g. "env:CG_EMBED_API_KEY". */
+  apiKeyRef?: string;
   contextLength: number;
 }
 
@@ -31,7 +45,10 @@ export interface LlmConfig {
   provider: LlmProvider;
   model: string;
   host: string;
+  /** Resolved API key (for runtime use — never persisted). */
   apiKey?: string;
+  /** Ref to the env var holding the secret, e.g. "env:CG_LLM_API_KEY". */
+  apiKeyRef?: string;
   contextWindow: number;
   maxTokens: number;
 }
@@ -80,31 +97,27 @@ export function getConfig(): ContextGardenConfig {
 
 /**
  * Initialize the config singleton.
- * Cascade: defaults → config.json → env vars.
+ * Cascade: defaults → config.json.
+ * Env vars are NOT applied for provider fields (config.json is authoritative).
  */
 export function initConfig(dataDir?: string): ContextGardenConfig {
   const resolvedDataDir = dataDir ?? process.cwd();
   const configPath = join(resolvedDataDir, ".context-garden", "config.json");
 
-  // Start with defaults
   const config: ContextGardenConfig = {
     dataDir: resolvedDataDir,
     embedding: { ...DEFAULTS.embedding },
     synthesizer: { ...DEFAULTS.synthesizer },
   };
 
-  // Layer 2: config.json
   if (fileExists(configPath)) {
     try {
       const raw = JSON.parse(readText(configPath)) as Partial<PersistedConfig>;
-      applyPersisted(config, raw);
+      applyPersisted(config, raw, configPath);
     } catch {
       // Invalid config file — skip
     }
   }
-
-  // Layer 3: env vars
-  applyEnv(config);
 
   _config = config;
   return config;
@@ -112,7 +125,8 @@ export function initConfig(dataDir?: string): ContextGardenConfig {
 
 /**
  * Runtime override from MCP `configure` tool.
- * Optionally persists to config.json.
+ * When an API key is provided it is written to ~/.context-garden/.env
+ * and an apiKeyRef is set in the config. Optionally persists to config.json.
  */
 export function updateConfig(
   overrides: Partial<ConfigOverrides>,
@@ -123,14 +137,24 @@ export function updateConfig(
   if (overrides.embedProvider !== undefined) config.embedding.provider = overrides.embedProvider;
   if (overrides.embedModel !== undefined) config.embedding.model = overrides.embedModel;
   if (overrides.embedHost !== undefined) config.embedding.host = overrides.embedHost;
-  if (overrides.embedApiKey !== undefined) config.embedding.apiKey = overrides.embedApiKey;
   if (overrides.embedContextLength !== undefined) config.embedding.contextLength = overrides.embedContextLength;
   if (overrides.llmProvider !== undefined) config.synthesizer.provider = overrides.llmProvider;
   if (overrides.llmModel !== undefined) config.synthesizer.model = overrides.llmModel;
   if (overrides.llmHost !== undefined) config.synthesizer.host = overrides.llmHost;
-  if (overrides.llmApiKey !== undefined) config.synthesizer.apiKey = overrides.llmApiKey;
   if (overrides.llmContextWindow !== undefined) config.synthesizer.contextWindow = overrides.llmContextWindow;
   if (overrides.llmMaxTokens !== undefined) config.synthesizer.maxTokens = overrides.llmMaxTokens;
+
+  // API keys: write to .env, set ref + resolved value in memory
+  if (overrides.embedApiKey !== undefined) {
+    _writeToDotEnv("CG_EMBED_API_KEY", overrides.embedApiKey);
+    config.embedding.apiKey = overrides.embedApiKey;
+    config.embedding.apiKeyRef = "env:CG_EMBED_API_KEY";
+  }
+  if (overrides.llmApiKey !== undefined) {
+    _writeToDotEnv("CG_LLM_API_KEY", overrides.llmApiKey);
+    config.synthesizer.apiKey = overrides.llmApiKey;
+    config.synthesizer.apiKeyRef = "env:CG_LLM_API_KEY";
+  }
 
   if (persist) {
     persistConfig(config);
@@ -141,6 +165,7 @@ export function updateConfig(
 
 /**
  * Get the current config as a flat overrides object (for MCP response).
+ * Raw API key values are never included — only whether they are set.
  */
 export function getConfigSnapshot(): ConfigOverrides {
   const c = getConfig();
@@ -148,12 +173,12 @@ export function getConfigSnapshot(): ConfigOverrides {
     embedProvider: c.embedding.provider,
     embedModel: c.embedding.model,
     embedHost: c.embedding.host,
-    embedApiKey: c.embedding.apiKey,
+    embedApiKey: c.embedding.apiKey ? "***" : undefined,
     embedContextLength: c.embedding.contextLength,
     llmProvider: c.synthesizer.provider,
     llmModel: c.synthesizer.model,
     llmHost: c.synthesizer.host,
-    llmApiKey: c.synthesizer.apiKey,
+    llmApiKey: c.synthesizer.apiKey ? "***" : undefined,
     llmContextWindow: c.synthesizer.contextWindow,
     llmMaxTokens: c.synthesizer.maxTokens,
   };
@@ -182,53 +207,90 @@ export interface ConfigOverrides {
 // ---------------------------------------------------------------------------
 
 interface PersistedConfig {
-  embedding?: Partial<EmbedConfig>;
-  synthesizer?: Partial<LlmConfig>;
+  embedding?: Partial<PersistedEmbedConfig>;
+  synthesizer?: Partial<PersistedLlmConfig>;
 }
 
-function applyPersisted(config: ContextGardenConfig, raw: Partial<PersistedConfig>): void {
+interface PersistedEmbedConfig {
+  provider: EmbedProvider;
+  model: string;
+  host: string;
+  /** Never written; triggers auto-migration if found in an old config.json. */
+  apiKey?: string;
+  /** Canonical: "env:CG_EMBED_API_KEY" */
+  apiKeyRef?: string;
+  contextLength: number;
+}
+
+interface PersistedLlmConfig {
+  provider: LlmProvider;
+  model: string;
+  host: string;
+  /** Never written; triggers auto-migration if found in an old config.json. */
+  apiKey?: string;
+  /** Canonical: "env:CG_LLM_API_KEY" */
+  apiKeyRef?: string;
+  contextWindow: number;
+  maxTokens: number;
+}
+
+function applyPersisted(
+  config: ContextGardenConfig,
+  raw: Partial<PersistedConfig>,
+  configPath: string,
+): void {
+  let needsResave = false;
+
   if (raw.embedding) {
-    if (raw.embedding.provider) config.embedding.provider = raw.embedding.provider;
-    if (raw.embedding.model) config.embedding.model = raw.embedding.model;
-    if (raw.embedding.host) config.embedding.host = raw.embedding.host;
-    if (raw.embedding.apiKey) config.embedding.apiKey = raw.embedding.apiKey;
-    if (raw.embedding.contextLength) config.embedding.contextLength = raw.embedding.contextLength;
+    const e = raw.embedding;
+    if (e.provider) config.embedding.provider = e.provider;
+    if (e.model) config.embedding.model = e.model;
+    if (e.host) config.embedding.host = e.host;
+    if (e.contextLength) config.embedding.contextLength = e.contextLength;
+
+    if (e.apiKeyRef) {
+      config.embedding.apiKeyRef = e.apiKeyRef;
+      config.embedding.apiKey = _resolveRef(e.apiKeyRef);
+    } else if (e.apiKey) {
+      // Auto-migrate legacy plaintext key → .env
+      _writeToDotEnv("CG_EMBED_API_KEY", e.apiKey);
+      config.embedding.apiKey = e.apiKey;
+      config.embedding.apiKeyRef = "env:CG_EMBED_API_KEY";
+      needsResave = true;
+    }
   }
+
   if (raw.synthesizer) {
-    if (raw.synthesizer.provider) config.synthesizer.provider = raw.synthesizer.provider;
-    if (raw.synthesizer.model) config.synthesizer.model = raw.synthesizer.model;
-    if (raw.synthesizer.host) config.synthesizer.host = raw.synthesizer.host;
-    if (raw.synthesizer.apiKey) config.synthesizer.apiKey = raw.synthesizer.apiKey;
-    if (raw.synthesizer.contextWindow) config.synthesizer.contextWindow = raw.synthesizer.contextWindow;
-    if (raw.synthesizer.maxTokens) config.synthesizer.maxTokens = raw.synthesizer.maxTokens;
+    const s = raw.synthesizer;
+    if (s.provider) config.synthesizer.provider = s.provider;
+    if (s.model) config.synthesizer.model = s.model;
+    if (s.host) config.synthesizer.host = s.host;
+    if (s.contextWindow) config.synthesizer.contextWindow = s.contextWindow;
+    if (s.maxTokens) config.synthesizer.maxTokens = s.maxTokens;
+
+    if (s.apiKeyRef) {
+      config.synthesizer.apiKeyRef = s.apiKeyRef;
+      config.synthesizer.apiKey = _resolveRef(s.apiKeyRef);
+    } else if (s.apiKey) {
+      // Auto-migrate legacy plaintext key → .env
+      _writeToDotEnv("CG_LLM_API_KEY", s.apiKey);
+      config.synthesizer.apiKey = s.apiKey;
+      config.synthesizer.apiKeyRef = "env:CG_LLM_API_KEY";
+      needsResave = true;
+    }
+  }
+
+  // Rewrite config.json without the plaintext key
+  if (needsResave) {
+    try {
+      persistConfig(config, configPath);
+    } catch {
+      // Non-fatal — config is valid in memory
+    }
   }
 }
 
-function applyEnv(config: ContextGardenConfig): void {
-  const env = process.env;
-
-  if (env["CG_EMBED_PROVIDER"]) config.embedding.provider = env["CG_EMBED_PROVIDER"] as EmbedProvider;
-  if (env["CG_EMBED_MODEL"]) config.embedding.model = env["CG_EMBED_MODEL"];
-  if (env["CG_EMBED_HOST"]) config.embedding.host = env["CG_EMBED_HOST"];
-  if (env["CG_LLM_PROVIDER"]) config.synthesizer.provider = env["CG_LLM_PROVIDER"] as LlmProvider;
-  if (env["CG_LLM_MODEL"]) config.synthesizer.model = env["CG_LLM_MODEL"];
-  if (env["CG_LLM_HOST"]) {
-    const normalized = env["CG_LLM_HOST"]
-      .replace(/\/$/, "")
-      .replace(/\/v1(?:\/chat\/completions)?\/?$/, "");
-    config.synthesizer.host = normalized;
-  }
-
-  // API keys — check CG_ prefixed first, then fallback to bare keys
-  if (env["CG_EMBED_API_KEY"] || env["OPENAI_API_KEY"]) {
-    config.embedding.apiKey = env["CG_EMBED_API_KEY"] ?? env["OPENAI_API_KEY"];
-  }
-  if (env["CG_LLM_API_KEY"] || env["OPENAI_API_KEY"] || env["ANTHROPIC_API_KEY"]) {
-    config.synthesizer.apiKey = env["CG_LLM_API_KEY"] ?? env["ANTHROPIC_API_KEY"] ?? env["OPENAI_API_KEY"];
-  }
-}
-
-function persistConfig(config: ContextGardenConfig): void {
+function persistConfig(config: ContextGardenConfig, overridePath?: string): void {
   const configDir = join(config.dataDir, ".context-garden");
   ensureDir(configDir);
 
@@ -237,20 +299,71 @@ function persistConfig(config: ContextGardenConfig): void {
       provider: config.embedding.provider,
       model: config.embedding.model,
       host: config.embedding.host,
-      apiKey: config.embedding.apiKey,
       contextLength: config.embedding.contextLength,
+      // Write ref, never raw key
+      ...(config.embedding.apiKeyRef ? { apiKeyRef: config.embedding.apiKeyRef } : {}),
     },
     synthesizer: {
       provider: config.synthesizer.provider,
       model: config.synthesizer.model,
       host: config.synthesizer.host,
-      apiKey: config.synthesizer.apiKey,
       contextWindow: config.synthesizer.contextWindow,
       maxTokens: config.synthesizer.maxTokens,
+      // Write ref, never raw key
+      ...(config.synthesizer.apiKeyRef ? { apiKeyRef: config.synthesizer.apiKeyRef } : {}),
     },
   };
 
-  writeText(join(configDir, "config.json"), JSON.stringify(persisted, null, 2));
+  const path = overridePath ?? join(configDir, "config.json");
+  writeText(path, JSON.stringify(persisted, null, 2));
+}
+
+// ---------------------------------------------------------------------------
+// .env helpers
+// ---------------------------------------------------------------------------
+
+function _dotEnvPath(): string {
+  return join(homedir(), ".context-garden", ".env");
+}
+
+function _loadDotEnv(): Record<string, string> {
+  const path = _dotEnvPath();
+  const secrets: Record<string, string> = {};
+  if (!fileExists(path)) return secrets;
+  for (const line of readText(path).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+    const eq = trimmed.indexOf("=");
+    const k = trimmed.slice(0, eq).trim();
+    let v = trimmed.slice(eq + 1).trim();
+    // Strip surrounding quotes
+    if (v.length >= 2 && v[0] === v[v.length - 1] && (v[0] === '"' || v[0] === "'")) {
+      v = v.slice(1, -1);
+    }
+    secrets[k] = v;
+  }
+  return secrets;
+}
+
+function _writeToDotEnv(key: string, value: string): void {
+  const path = _dotEnvPath();
+  ensureDir(join(homedir(), ".context-garden"));
+
+  let lines: string[] = [];
+  if (fileExists(path)) {
+    lines = readText(path).split("\n").filter((l) => !l.trim().startsWith(key + "="));
+  }
+  lines.push(`${key}=${value}`);
+  // Ensure trailing newline
+  const content = lines.join("\n").replace(/\n+$/, "") + "\n";
+  writeText(path, content);
+}
+
+function _resolveRef(ref: string): string | undefined {
+  if (!ref.startsWith("env:")) return undefined;
+  const varName = ref.slice(4);
+  const secrets = _loadDotEnv();
+  return secrets[varName] || process.env[varName] || undefined;
 }
 
 // ---------------------------------------------------------------------------

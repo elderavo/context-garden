@@ -412,19 +412,10 @@ export class ContextEngine extends EventEmitter {
     const pythonPath = resolvePythonPath(cacheFile);
     const daemonCwd = dirname(this.config.mdDbPath);
 
+    // Tell the Python daemon where to find config.json
     const envOverrides: Record<string, string> = {
-      CG_EMBED_PROVIDER: cgConfig.embedding.provider,
-      CG_EMBED_MODEL: cgConfig.embedding.model,
-      CG_EMBED_HOST: cgConfig.embedding.host,
-      CG_EMBED_CONTEXT_LENGTH: String(cgConfig.embedding.contextLength),
-      // Legacy names for backwards compat
-      OBSIDI_EMBED_PROVIDER: cgConfig.embedding.provider,
-      OBSIDI_EMBED_MODEL: cgConfig.embedding.model,
-      OBSIDI_EMBED_HOST: cgConfig.embedding.host,
+      CG_DATA_DIR: cgConfig.dataDir,
     };
-    if (cgConfig.embedding.apiKey) {
-      envOverrides["OPENAI_API_KEY"] = cgConfig.embedding.apiKey;
-    }
 
     this.client = new DaemonClient(pythonPath, daemonCwd, envOverrides);
     await this.client.connect();

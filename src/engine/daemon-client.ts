@@ -158,6 +158,8 @@ export class DaemonClient {
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) env[k] = v;
     }
+    // Prevent roaming user-site packages from leaking into the conda interpreter
+    env["PYTHONNOUSERSITE"] = "1";
     Object.assign(env, this.envOverrides);
 
     const proc = spawn(this.pythonPath, ["-m", "graph.daemon"], {

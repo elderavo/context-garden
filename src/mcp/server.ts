@@ -511,8 +511,8 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
 
       // ── 6. Next steps ──────────────────────────────────────────────────────
       const issues: string[] = [];
-      if (embedKeyNeeded) issues.push(`- Provide \`embed_api_key\` (or set \`${snap.embedProvider === "openai" ? "OPENAI_API_KEY" : "CG_EMBED_API_KEY"}\` env var)`);
-      if (llmKeyNeeded)   issues.push(`- Provide \`llm_api_key\` (or set \`${snap.llmProvider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"}\` env var)`);
+      if (embedKeyNeeded) issues.push("- Provide `embed_api_key` (key is stored in ~/.context-garden/.env, never in config.json)");
+      if (llmKeyNeeded)   issues.push("- Provide `llm_api_key` (key is stored in ~/.context-garden/.env, never in config.json)");
       if (workspaces.length === 0) issues.push("- Register a workspace: provide `workspace_name`, `workspace_source_dir`, and optionally `workspace_languages`");
 
       lines.push("### Next Steps");

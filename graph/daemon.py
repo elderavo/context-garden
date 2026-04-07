@@ -397,8 +397,12 @@ class _DaemonServer:
     def _start_observer(self, runtime: WorkspaceRuntime) -> None:
         try:
             from watchdog.observers import Observer
-        except ImportError:
-            log.warning("watchdog not installed — file watching disabled")
+        except ImportError as exc:
+            log.warning(
+                "watchdog.observers could not be imported (%s) — file watching disabled. "
+                "Run: pip install 'watchdog>=4.0.0'",
+                exc,
+            )
             return
 
         handler = _make_watchdog_handler(runtime)
@@ -838,9 +842,52 @@ async def _periodic_metrics() -> None:
             log.debug("Metrics snapshot failed: %s", exc)
 
 
+async def _preflight_check() -> bool:
+    """Return True if our daemon is already running on DAEMON_PORT, exit(1) if another process owns it."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", DAEMON_PORT), timeout=1.0
+        )
+    except (ConnectionRefusedError, asyncio.TimeoutError, OSError):
+        return False  # Port is free
+
+    # Something is listening — probe for our daemon
+    alive = False
+    try:
+        writer.write(
+            (json.dumps({"id": "preflight", "method": "daemon.health", "params": {}}) + "\n").encode()
+        )
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+        resp = json.loads(line.decode())
+        alive = resp.get("result", {}).get("status") == "ok"
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+    if alive:
+        log.info("ContextGarden daemon already running on port %d — exiting.", DAEMON_PORT)
+        return True
+
+    log.error(
+        "Port %d is in use by a non-daemon process. "
+        "Stop that process or set CG_DAEMON_PORT to a different value.",
+        DAEMON_PORT,
+    )
+    sys.exit(1)
+
+
 async def _run_server() -> None:
     global _shutdown_event
     _shutdown_event = asyncio.Event()
+
+    if await _preflight_check():
+        return  # Another daemon instance is already running
 
     server = await asyncio.start_server(
         _handle_client,
@@ -862,8 +909,26 @@ async def _run_server() -> None:
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
+def _sync_port_check() -> bool:
+    """Quick synchronous check: is something already on DAEMON_PORT?"""
+    import socket as _socket
+    try:
+        s = _socket.create_connection(("127.0.0.1", DAEMON_PORT), timeout=1.0)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     log.info("ContextGarden daemon starting (data_dir=%s, port=%d)", DATA_DIR, DAEMON_PORT)
+
+    # Fast pre-check before expensive workspace boot — avoids wasting time
+    # loading 2000+ notes only to discover the port is already taken.
+    if _sync_port_check():
+        log.info("Port %d is already in use — running full preflight via asyncio.", DAEMON_PORT)
+        asyncio.run(_run_server())
+        return
 
     _daemon.load_registry()
     _daemon.boot_workspaces()
