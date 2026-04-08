@@ -11,7 +11,7 @@
 import { createConnection, Socket } from "net";
 import { join, dirname } from "path";
 import { randomUUID } from "crypto";
-import { execSync, spawn, type ChildProcess } from "child_process";
+import { execSync, spawn } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 
 const DAEMON_PORT = 7432;
@@ -31,11 +31,9 @@ export class DaemonClient {
   private socket: Socket | null = null;
   private buffer = "";
   private pending = new Map<string, RpcPending>();
-  private spawnedDaemon: ChildProcess | null = null;
   private connected = false;
   private reconnectDelay = 1_000;
   private shuttingDown = false;
-  private startedThisSession = false;
 
   constructor(
     private readonly pythonPath: string,
@@ -52,16 +50,9 @@ export class DaemonClient {
   async connect(): Promise<void> {
     if (this.connected) return;
 
-    // Explicit startup request semantics: first connect in this process always
-    // issues a daemon start, and Python handles restart-if-running.
-    if (!this.startedThisSession) {
+    const reachable = await this._probe();
+    if (!reachable) {
       await this._spawnDaemon();
-      this.startedThisSession = true;
-    } else {
-      const reachable = await this._probe();
-      if (!reachable) {
-        await this._spawnDaemon();
-      }
     }
 
     await this._openSocket();
@@ -105,26 +96,12 @@ export class DaemonClient {
   }
 
   /**
-   * Close the socket. If we spawned the daemon, signal it to shut down.
+   * Close the socket. The daemon is a long-running OS process and is never
+   * shut down by the TS — only an explicit daemon.shutdown RPC does that.
    */
-  async close(): Promise<void> {
+  close(): void {
     this.shuttingDown = true;
-
-    if (this.connected && this.spawnedDaemon) {
-      // Only shut down the daemon if we spawned it
-      try {
-        await this.rpc("daemon.shutdown", {});
-      } catch {
-        // Ignore — we're shutting down anyway
-      }
-    }
-
     this._closeSocket();
-
-    if (this.spawnedDaemon) {
-      try { this.spawnedDaemon.kill("SIGTERM"); } catch { /* ignore */ }
-      this.spawnedDaemon = null;
-    }
   }
 
   // ── Connection internals ────────────────────────────────────────────────
@@ -175,8 +152,6 @@ export class DaemonClient {
       stdio: ["ignore", "ignore", "pipe"],
       detached: false,
     });
-
-    this.spawnedDaemon = proc;
 
     proc.stderr?.on("data", (chunk: Buffer) => {
       process.stderr.write(chunk);

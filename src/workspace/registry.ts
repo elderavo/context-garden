@@ -252,6 +252,34 @@ export class WorkspaceRegistry {
     }
   }
 
+  /**
+   * Run a full mirror pass for all active workspaces. Call on startup to
+   * catch any source changes that happened while the MCP server was down
+   * (chokidar misses these because it starts with ignoreInitial: true).
+   * Runs all workspaces concurrently; errors are logged but non-fatal.
+   */
+  async mirrorAllWorkspaces(): Promise<void> {
+    this.ensureLoaded();
+    const active = this.entries.filter((e) => e.active);
+    await Promise.all(
+      active.map(async (entry) => {
+        try {
+          await runWorkspaceMirror({
+            scanDir: entry.sourceDir,
+            mirrorDir: this.mirrorDir(entry),
+            languages: entry.languages,
+            force: false,
+            workspace: entry.name,
+            wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
+            omitPatterns: entry.omitPatterns,
+          });
+        } catch (err) {
+          process.stderr.write(`[registry] Mirror pass failed for "${entry.name}": ${err}\n`);
+        }
+      }),
+    );
+  }
+
   /** Start watchers for all active workspaces. Call during stack init. */
   startAllWatchers(): void {
     this.ensureLoaded();

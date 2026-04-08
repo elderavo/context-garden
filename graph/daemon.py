@@ -42,6 +42,7 @@ import os
 import queue as _queue
 import signal
 import socket
+import sqlite3
 import subprocess
 import shutil
 import sys
@@ -72,6 +73,164 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
+
+
+# ── Structured SQLite logger ─────────────────────────────────────────────────
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class DaemonLogger:
+    """Writes connection and RPC events to a SQLite database on a background thread.
+
+    All public methods are fire-and-forget: they enqueue a write and return
+    immediately.  The asyncio event loop never touches sqlite3 directly.
+
+    Schema
+    ------
+    connections(conn_id, peer, opened_at, closed_at, calls)
+    rpc_calls(id, ts, conn_id, method, req_id, workspace_id, workspace,
+              duration_ms, event, error)
+    """
+
+    _SENTINEL = object()
+
+    def __init__(self) -> None:
+        self._q: _queue.Queue[Any] = _queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._db_path: Optional[Path] = None
+
+    # ── Init ─────────────────────────────────────────────────────────────
+
+    def start(self, db_path: Path) -> None:
+        """Open (or create) the log DB and start the writer thread."""
+        self._db_path = db_path
+        self._thread = threading.Thread(
+            target=self._writer_loop,
+            name="daemon-logger",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Flush remaining writes and stop the writer thread."""
+        self._q.put(self._SENTINEL)
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    # ── Public API (fire-and-forget) ──────────────────────────────────────
+
+    def log_conn_open(self, conn_id: str, peer: str) -> None:
+        self._q.put(("conn_open", conn_id, peer, _now_iso()))
+
+    def log_conn_close(self, conn_id: str, calls: int) -> None:
+        self._q.put(("conn_close", conn_id, calls, _now_iso()))
+
+    def log_rpc(
+        self,
+        conn_id: str,
+        method: str,
+        req_id: Any,
+        workspace_id: Optional[str],
+        workspace: Optional[str],
+        duration_ms: float,
+        event: str,           # 'rpc.ok' | 'rpc.error'
+        error: Optional[str],
+    ) -> None:
+        self._q.put((
+            "rpc", _now_iso(), conn_id, method, str(req_id) if req_id is not None else None,
+            workspace_id, workspace, duration_ms, event, error,
+        ))
+
+    # ── Writer thread ─────────────────────────────────────────────────────
+
+    def _writer_loop(self) -> None:
+        assert self._db_path is not None
+        try:
+            con = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        except Exception as exc:
+            log.error("DaemonLogger: failed to open %s: %s", self._db_path, exc)
+            return
+
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+            self._migrate(con)
+            con.commit()
+
+            while True:
+                item = self._q.get()
+                if item is self._SENTINEL:
+                    break
+                try:
+                    self._handle(con, item)
+                    con.commit()
+                except Exception as exc:
+                    log.warning("DaemonLogger write error: %s", exc)
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+    def _migrate(self, con: sqlite3.Connection) -> None:
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS connections (
+                conn_id   TEXT PRIMARY KEY,
+                peer      TEXT,
+                opened_at TEXT,
+                closed_at TEXT,
+                calls     INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS rpc_calls (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           TEXT,
+                conn_id      TEXT,
+                method       TEXT,
+                req_id       TEXT,
+                workspace_id TEXT,
+                workspace    TEXT,
+                duration_ms  REAL,
+                event        TEXT,
+                error        TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS rpc_calls_ts     ON rpc_calls(ts);
+            CREATE INDEX IF NOT EXISTS rpc_calls_method ON rpc_calls(method);
+            CREATE INDEX IF NOT EXISTS rpc_calls_event  ON rpc_calls(event);
+        """)
+
+    def _handle(self, con: sqlite3.Connection, item: Any) -> None:
+        kind = item[0]
+        if kind == "conn_open":
+            _, conn_id, peer, opened_at = item
+            con.execute(
+                "INSERT OR IGNORE INTO connections(conn_id, peer, opened_at) VALUES (?,?,?)",
+                (conn_id, peer, opened_at),
+            )
+        elif kind == "conn_close":
+            _, conn_id, calls, closed_at = item
+            con.execute(
+                "UPDATE connections SET closed_at=?, calls=? WHERE conn_id=?",
+                (closed_at, calls, conn_id),
+            )
+        elif kind == "rpc":
+            (_, ts, conn_id, method, req_id, workspace_id,
+             workspace, duration_ms, event, error) = item
+            con.execute(
+                """INSERT INTO rpc_calls
+                   (ts, conn_id, method, req_id, workspace_id, workspace,
+                    duration_ms, event, error)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (ts, conn_id, method, req_id, workspace_id, workspace,
+                 duration_ms, event, error),
+            )
+
+
+_logger = DaemonLogger()
 
 
 def configure_paths(data_dir: str | Path) -> None:
@@ -370,6 +529,27 @@ class _DaemonServer:
         self._runtime_ready = threading.Condition(self._lock)
         self._boot_errors: dict[str, str] = {}
         self._start_time = time.monotonic()
+        self._active_connections: dict[str, dict[str, Any]] = {}  # conn_id → info
+
+    # ── Connection tracking (called from asyncio handler) ────────────────
+
+    def _conn_open(self, conn_id: str, peer: str, opened_at: str) -> None:
+        with self._lock:
+            self._active_connections[conn_id] = {
+                "conn_id": conn_id,
+                "peer": peer,
+                "opened_at": opened_at,
+                "call_count": 0,
+            }
+
+    def _conn_close(self, conn_id: str) -> None:
+        with self._lock:
+            self._active_connections.pop(conn_id, None)
+
+    def _conn_inc(self, conn_id: str) -> None:
+        with self._lock:
+            if conn_id in self._active_connections:
+                self._active_connections[conn_id]["call_count"] += 1
 
     # ── Registry persistence ─────────────────────────────────────────────
 
@@ -570,13 +750,15 @@ class _DaemonServer:
                         workspace_id = wid
                         break
             if not workspace_id:
-                raise KeyError(f"Workspace not found: {name}")
+                log.debug("workspaces.unregister: '%s' not found — already gone", name)
+                return {"ok": True, "existed": False}
         elif not workspace_id:
             raise ValueError("workspace_id or name is required")
 
         with self._lock:
             if workspace_id not in self._workspaces:
-                raise KeyError(f"Workspace not found: {workspace_id}")
+                log.debug("workspaces.unregister: %s not found — already gone", workspace_id)
+                return {"ok": True, "existed": False}
 
             # Stop observer
             self._stop_observer(workspace_id)
@@ -816,16 +998,27 @@ class _DaemonServer:
             log.debug("psutil unavailable for daemon.health memory stats: %s", exc)
 
         with self._lock:
-            ws_summary = [
-                {"workspace_id": wid, "name": rt.record.name, "state": rt.state, "doc_count": rt.doc_count}
-                for wid, rt in self._runtimes.items()
-            ]
+            ws_summary = []
+            for wid, rec in self._workspaces.items():
+                rt = self._runtimes.get(wid)
+                ws_summary.append({
+                    "workspace_id": wid,
+                    "name": rec.name,
+                    "root_path": rec.root_path,
+                    "state": rt.state if rt else "initializing",
+                    "doc_count": rt.doc_count if rt else 0,
+                    "watcher_active": wid in self._observers,
+                    "last_indexed_at": rt.last_indexed_at if rt else None,
+                })
+            active_conns = list(self._active_connections.values())
 
         return {
             "status": "ok",
             "uptime_secs": round(uptime, 1),
             "rss_mb": round(rss_mb, 1) if rss_mb is not None else None,
+            "data_dir": str(DATA_DIR),
             "workspaces": ws_summary,
+            "active_connections": active_conns,
         }
 
     def handle_daemon_shutdown(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -887,7 +1080,12 @@ _shutdown_event: asyncio.Event
 
 async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     peer = writer.get_extra_info("peername")
-    log.debug("Client connected: %s", peer)
+    conn_id = str(uuid.uuid4())[:8]
+    call_count = 0
+
+    log.info("conn.open  peer=%s conn_id=%s", peer, conn_id)
+    _logger.log_conn_open(conn_id, str(peer))
+    _daemon._conn_open(conn_id, str(peer), _now_iso())
 
     loop = asyncio.get_event_loop()
 
@@ -895,7 +1093,7 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         while True:
             try:
                 line = await reader.readline()
-            except asyncio.IncompleteReadError:
+            except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
                 break
             if not line:
                 break
@@ -914,15 +1112,39 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             method = req.get("method", "")
             params = req.get("params", {})
 
+            t0 = time.monotonic()
             try:
                 if method in _daemon._BLOCKING_METHODS:
                     result = await loop.run_in_executor(None, _daemon.dispatch, method, params)
                 else:
                     result = _daemon.dispatch(method, params)
+
+                dur_ms = round((time.monotonic() - t0) * 1000, 1)
+                log.info(
+                    "rpc.ok   conn=%s method=%s duration_ms=%.1f",
+                    conn_id, method, dur_ms,
+                )
+                _logger.log_rpc(
+                    conn_id, method, req_id,
+                    params.get("workspace_id"), params.get("workspace"),
+                    dur_ms, "rpc.ok", None,
+                )
                 resp = {"id": req_id, "result": result}
             except Exception as exc:
-                log.error("RPC %s failed: %s", method, exc)
+                dur_ms = round((time.monotonic() - t0) * 1000, 1)
+                log.error(
+                    "rpc.error conn=%s method=%s duration_ms=%.1f error=%s",
+                    conn_id, method, dur_ms, exc,
+                )
+                _logger.log_rpc(
+                    conn_id, method, req_id,
+                    params.get("workspace_id"), params.get("workspace"),
+                    dur_ms, "rpc.error", str(exc),
+                )
                 resp = {"id": req_id, "error": {"code": -1, "message": str(exc)}}
+
+            call_count += 1
+            _daemon._conn_inc(conn_id)
 
             try:
                 writer.write((json.dumps(resp) + "\n").encode("utf-8"))
@@ -936,7 +1158,9 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 break
 
     finally:
-        log.debug("Client disconnected: %s", peer)
+        log.info("conn.close peer=%s conn_id=%s calls=%d", peer, conn_id, call_count)
+        _logger.log_conn_close(conn_id, call_count)
+        _daemon._conn_close(conn_id)
         try:
             writer.close()
             await writer.wait_closed()
@@ -984,6 +1208,10 @@ async def _boot_workspaces_in_background() -> None:
         await asyncio.to_thread(_daemon.boot_workspaces)
     except Exception as exc:
         log.error("Background workspace boot failed: %s", exc)
+
+
+class DaemonAlreadyRunning(Exception):
+    """Raised when a healthy daemon with the same data-dir is already on the port."""
 
 
 def _is_addr_in_use(exc: OSError) -> bool:
@@ -1090,12 +1318,28 @@ def _restart_existing_daemon_if_needed() -> None:
     if not _port_is_open():
         return
 
-    if not _is_contextgarden_daemon():
+    response = _rpc_request("daemon.health", {})
+    result = response.get("result") if response else None
+    if not (isinstance(result, dict) and result.get("status") == "ok"):
         raise RuntimeError(
             f"Port {DAEMON_PORT} is already in use by a non-ContextGarden process; refusing to kill it."
         )
 
-    log.info("Existing daemon detected on %s:%d; requesting graceful shutdown", DAEMON_HOST, DAEMON_PORT)
+    # Same data-dir → a peer process already started the daemon we'd become.
+    # Exit cleanly so the caller's _spawnDaemon() probe finds the running instance.
+    existing_data_dir = result.get("data_dir")
+    if existing_data_dir:
+        try:
+            if Path(existing_data_dir).resolve() == DATA_DIR.resolve():
+                raise DaemonAlreadyRunning(
+                    f"healthy daemon already running with same data_dir={existing_data_dir}"
+                )
+        except DaemonAlreadyRunning:
+            raise
+        except Exception:
+            pass  # path comparison failed; fall through to restart
+
+    log.info("Existing daemon detected on %s:%d (different data_dir); requesting graceful shutdown", DAEMON_HOST, DAEMON_PORT)
     _request_existing_shutdown()
     if _wait_port_free(10.0):
         log.info("Existing daemon stopped gracefully")
@@ -1156,9 +1400,16 @@ def main(data_dir: Optional[str] = None) -> None:
     from .config import set_data_dir
     set_data_dir(DATA_DIR)
 
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _logger.start(STATE_DIR / "daemon.log.db")
+
     log.info("ContextGarden daemon starting (data_dir=%s, port=%d)", DATA_DIR, DAEMON_PORT)
 
-    _restart_existing_daemon_if_needed()
+    try:
+        _restart_existing_daemon_if_needed()
+    except DaemonAlreadyRunning as exc:
+        log.info("Daemon already running with same config — exiting: %s", exc)
+        return
 
     _daemon.load_registry()
 
@@ -1166,6 +1417,11 @@ def main(data_dir: Optional[str] = None) -> None:
         asyncio.run(_run_server())
     except KeyboardInterrupt:
         log.info("Daemon interrupted by user")
+    except DaemonAlreadyRunning as exc:
+        # Late-race: another process bound the port between our check and asyncio.start_server
+        log.info("Daemon already running (late-race) — exiting: %s", exc)
+    finally:
+        _logger.stop()
 
 
 if __name__ == "__main__":

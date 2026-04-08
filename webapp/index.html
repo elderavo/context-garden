@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ContextGarden</title>
+  <style>
+    :root {
+      --bg:      #0f1117;
+      --surface: #161923;
+      --raised:  #1d2130;
+      --border:  #252836;
+      --text:    #e2e8f0;
+      --muted:   #64748b;
+      --dim:     #94a3b8;
+      --green:   #22c55e;
+      --red:     #ef4444;
+      --yellow:  #f59e0b;
+      --blue:    #3b82f6;
+      --indigo:  #6366f1;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'Consolas', 'Liberation Mono', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 28px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .logo {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--text);
+    }
+    .logo em { color: var(--green); font-style: normal; }
+    .meta { color: var(--muted); font-size: 11px; }
+
+    /* ── Main layout ─────────────────────────────────────────────────────── */
+    main {
+      padding: 24px 28px;
+      max-width: 1100px;
+    }
+
+    .grid-top {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+    .card-title {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    /* ── Daemon status card ──────────────────────────────────────────────── */
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .dot.running  { background: var(--green);  box-shadow: 0 0 7px var(--green); }
+    .dot.stopped  { background: var(--red); }
+    .dot.pending  { background: var(--yellow); animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:0.4; } }
+
+    .status-label { font-size: 15px; font-weight: 600; }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat { }
+    .stat-label { font-size: 10px; color: var(--muted); margin-bottom: 3px; letter-spacing: 0.06em; text-transform: uppercase; }
+    .stat-value { font-size: 17px; font-weight: 600; color: var(--text); }
+    .stat-value.muted { color: var(--dim); }
+
+    .btn-row { display: flex; gap: 8px; }
+    button {
+      padding: 7px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    button:active  { transform: scale(0.97); }
+    button:hover:not(:disabled) { opacity: 0.85; }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-stop  { background: rgba(239,68,68,0.15);  color: var(--red);   border: 1px solid rgba(239,68,68,0.3); }
+    .btn-start { background: rgba(34,197,94,0.15);  color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+
+    /* ── Overview card ───────────────────────────────────────────────────── */
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    .ov-stat { }
+    .ov-label { font-size: 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
+    .ov-value { font-size: 26px; font-weight: 700; color: var(--text); }
+    .ov-sub   { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Tables ──────────────────────────────────────────────────────────── */
+    .table-card { margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      text-align: left;
+      padding: 0 12px 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    tbody td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--raised); }
+    .empty-row td { color: var(--muted); text-align: center; padding: 20px; font-style: italic; }
+
+    /* ── Badges ──────────────────────────────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .badge.idle          { background: rgba(100,116,139,0.15); color: var(--dim); }
+    .badge.indexing      { background: rgba(59,130,246,0.15);  color: var(--blue); }
+    .badge.paused        { background: rgba(245,158,11,0.15);  color: var(--yellow); }
+    .badge.error         { background: rgba(239,68,68,0.15);   color: var(--red); }
+    .badge.uninitialized { background: rgba(100,116,139,0.1);  color: var(--muted); }
+
+    .path-cell { color: var(--muted); font-size: 11px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mono { font-family: inherit; color: var(--indigo); }
+    .watcher-on  { color: var(--green); }
+    .watcher-off { color: var(--muted); }
+    .btn-unregister {
+      padding: 3px 8px;
+      background: transparent;
+      border: 1px solid rgba(239,68,68,0.25);
+      color: var(--muted);
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .btn-unregister:hover { color: var(--red); border-color: rgba(239,68,68,0.6); }
+    .btn-unregister:disabled { opacity: 0.3; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Context<em>Garden</em></div>
+  <div class="meta" id="last-update">—</div>
+</header>
+
+<main>
+  <div class="grid-top">
+
+    <!-- Daemon card -->
+    <div class="card">
+      <div class="card-title">Daemon</div>
+      <div class="status-line">
+        <div class="dot stopped" id="status-dot"></div>
+        <div class="status-label" id="status-label">Checking…</div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat">
+          <div class="stat-label">Uptime</div>
+          <div class="stat-value muted" id="stat-uptime">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Memory</div>
+          <div class="stat-value muted" id="stat-memory">—</div>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn-stop"  id="btn-stop"  onclick="stopDaemon()"  disabled>Stop</button>
+        <button class="btn-start" id="btn-start" onclick="startDaemon()" disabled>Start</button>
+      </div>
+    </div>
+
+    <!-- Overview card -->
+    <div class="card">
+      <div class="card-title">Overview</div>
+      <div class="overview-grid">
+        <div class="ov-stat">
+          <div class="ov-label">Workspaces</div>
+          <div class="ov-value" id="ov-workspaces">—</div>
+          <div class="ov-sub">registered</div>
+        </div>
+        <div class="ov-stat">
+          <div class="ov-label">Documents</div>
+          <div class="ov-value" id="ov-docs">—</div>
+          <div class="ov-sub">indexed</div>
+        </div>
+        <div class="ov-stat">
+          <div class="ov-label">Connections</div>
+          <div class="ov-value" id="ov-conns">—</div>
+          <div class="ov-sub">active</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Workspaces table -->
+  <div class="card table-card">
+    <div class="card-title">Workspaces</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>State</th>
+          <th>Docs</th>
+          <th>Watcher</th>
+          <th>Path</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="ws-body">
+        <tr class="empty-row"><td colspan="6">No data</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Active connections table -->
+  <div class="card table-card">
+    <div class="card-title">Active Connections</div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Peer</th>
+          <th>Calls</th>
+          <th>Since</th>
+        </tr>
+      </thead>
+      <tbody id="conn-body">
+        <tr class="empty-row"><td colspan="4">No active connections</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  function esc(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function fmtUptime(secs) {
+    if (secs == null) return '—';
+    secs = Math.floor(secs);
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    try {
+      return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch { return iso; }
+  }
+
+  function setDot(state) {
+    const dot = document.getElementById('status-dot');
+    dot.className = 'dot ' + state;
+  }
+
+  function setBtns(running) {
+    document.getElementById('btn-stop').disabled  = !running;
+    document.getElementById('btn-start').disabled = running;
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────────
+
+  function renderOffline() {
+    setDot('stopped');
+    document.getElementById('status-label').textContent = 'Stopped';
+    document.getElementById('stat-uptime').textContent  = '—';
+    document.getElementById('stat-memory').textContent  = '—';
+    document.getElementById('ov-workspaces').textContent = '—';
+    document.getElementById('ov-docs').textContent       = '—';
+    document.getElementById('ov-conns').textContent      = '—';
+    setBtns(false);
+    document.getElementById('ws-body').innerHTML   = '<tr class="empty-row"><td colspan="5">Daemon offline</td></tr>';
+    document.getElementById('conn-body').innerHTML = '<tr class="empty-row"><td colspan="4">No active connections</td></tr>';
+  }
+
+  function renderData(d) {
+    setDot('running');
+    document.getElementById('status-label').textContent = 'Running';
+    document.getElementById('stat-uptime').textContent  = fmtUptime(d.uptime_secs);
+    document.getElementById('stat-memory').textContent  = d.rss_mb != null ? `${d.rss_mb} MB` : '—';
+    setBtns(true);
+
+    const workspaces = d.workspaces || [];
+    const conns      = d.active_connections || [];
+    const totalDocs  = workspaces.reduce((n, w) => n + (w.doc_count || 0), 0);
+
+    document.getElementById('ov-workspaces').textContent = workspaces.length;
+    document.getElementById('ov-docs').textContent       = totalDocs;
+    document.getElementById('ov-conns').textContent      = conns.length;
+
+    // Workspaces
+    if (workspaces.length === 0) {
+      document.getElementById('ws-body').innerHTML = '<tr class="empty-row"><td colspan="6">No workspaces registered</td></tr>';
+    } else {
+      document.getElementById('ws-body').innerHTML = workspaces.map(w => {
+        const watcherHtml = w.watcher_active != null
+          ? (w.watcher_active
+              ? '<span class="watcher-on">&#10003; on</span>'
+              : '<span class="watcher-off">off</span>')
+          : '—';
+        return `<tr>
+          <td><strong>${esc(w.name)}</strong></td>
+          <td><span class="badge ${esc(w.state || 'idle')}">${esc(w.state || 'idle')}</span></td>
+          <td>${w.doc_count ?? '—'}</td>
+          <td>${watcherHtml}</td>
+          <td class="path-cell" title="${esc(w.root_path || '')}">${esc(w.root_path || '')}</td>
+          <td><button class="btn-unregister" onclick="unregisterWorkspace('${esc(w.workspace_id)}', this)" title="Unregister workspace">&#x2715;</button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Connections
+    if (conns.length === 0) {
+      document.getElementById('conn-body').innerHTML = '<tr class="empty-row"><td colspan="4">No active connections</td></tr>';
+    } else {
+      document.getElementById('conn-body').innerHTML = conns.map(c => `<tr>
+        <td class="mono">${esc(c.conn_id)}</td>
+        <td>${esc(c.peer)}</td>
+        <td>${c.call_count ?? 0}</td>
+        <td style="color:var(--muted)">${fmtTime(c.opened_at)}</td>
+      </tr>`).join('');
+    }
+  }
+
+  // ── Polling ──────────────────────────────────────────────────────────────
+
+  async function poll() {
+    try {
+      const res  = await fetch('/api/status');
+      const data = await res.json();
+      if (data.status === 'ok') renderData(data);
+      else renderOffline();
+    } catch {
+      renderOffline();
+    }
+    document.getElementById('last-update').textContent =
+      'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  // ── Actions ──────────────────────────────────────────────────────────────
+
+  async function stopDaemon() {
+    const btn = document.getElementById('btn-stop');
+    btn.disabled = true;
+    btn.textContent = 'Stopping…';
+    try { await fetch('/api/daemon/stop', { method: 'POST' }); } catch {}
+    setTimeout(poll, 800);
+    btn.textContent = 'Stop';
+  }
+
+  async function unregisterWorkspace(id, btn) {
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+      await fetch(`/api/workspaces/${encodeURIComponent(id)}/unregister`, { method: 'POST' });
+    } catch {}
+    await poll();
+  }
+
+  async function startDaemon() {
+    const btn = document.getElementById('btn-start');
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    setDot('pending');
+    document.getElementById('status-label').textContent = 'Starting…';
+    try { await fetch('/api/daemon/start', { method: 'POST' }); } catch {}
+    await poll();
+    btn.textContent = 'Start';
+  }
+
+  // Start
+  poll();
+  setInterval(poll, 3000);
+</script>
+</body>
+</html>

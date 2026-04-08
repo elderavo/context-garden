@@ -49,11 +49,6 @@ export async function createStack(dataDir?: string): Promise<StackComponents> {
   );
   registry.load();
 
-  // Remove the legacy single "default" daemon workspace (whole md_db/) if it
-  // still exists from the old single-workspace design. Per-workspace entries
-  // replace it; leaving it causes duplicate results in fan-out queries.
-  await engine.unregisterDaemonWorkspace("default");
-
   // Sync TS workspaces → daemon (idempotent; daemon dedupes by root_path).
   // Each TS workspace mirrors source code into md_db/code/<name>/ — that mirror
   // dir is what the daemon indexes.
@@ -68,7 +63,9 @@ export async function createStack(dataDir?: string): Promise<StackComponents> {
     }
   }
 
-  // Start watchers for all active workspaces
+  // Catch any source changes that happened while the MCP server was down,
+  // then start watchers for ongoing changes.
+  await registry.mirrorAllWorkspaces();
   registry.startAllWatchers();
 
   // Start lint watcher

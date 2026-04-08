@@ -453,11 +453,11 @@ export class ContextEngine extends EventEmitter {
   }
 
   /**
-   * Disconnect from the daemon. If we spawned it, signals shutdown.
+   * Disconnect from the daemon. The daemon keeps running.
    */
   async close(): Promise<void> {
     if (this.client) {
-      await this.client.close();
+      this.client.close();
       this.client = null;
     }
     this.initialized = false;
