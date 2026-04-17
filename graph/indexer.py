@@ -134,10 +134,76 @@ def _first_str(*values: object) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _build_suffix_index(notes_by_id: dict[str, ParsedNote]) -> dict[str, list[str]]:
+    """Pre-build a suffix → [note_id] lookup for O(1) wikilink resolution.
+
+    Indexes each note by all of its path suffixes (e.g. "foo/bar.md", "bar.md",
+    "bar") so that _resolve_link_fast never has to iterate the full note set.
+    """
+    index: dict[str, list[str]] = {}
+    type_priority = {"tool": 0, "concept": 1, "codeUnit": 2, "codeSymbol": 3, "index": 4, "codebase": 5}
+    for note_id, note in notes_by_id.items():
+        norm = note_id.replace("\\", "/")
+        parts = norm.split("/")
+        # Register progressively shorter suffixes: full path, then each tail
+        for i in range(len(parts)):
+            suffix = "/".join(parts[i:])
+            index.setdefault(suffix, []).append(note_id)
+            # Also without .md extension
+            if suffix.endswith(".md"):
+                index.setdefault(suffix[:-3], []).append(note_id)
+        # Stem-only key (basename without extension, lowercase for case-insensitive match)
+        stem = Path(parts[-1]).stem.lower()
+        index.setdefault(f"__stem__{stem}", []).append(note_id)
+
+    # Sort each bucket by type priority so the best match is always first
+    for key in index:
+        if len(index[key]) > 1:
+            index[key].sort(key=lambda nid: type_priority.get(notes_by_id[nid].note_type, 99))
+    return index
+
+
+def _resolve_link_fast(
+    target: str,
+    notes_by_id: dict[str, ParsedNote],
+    suffix_index: dict[str, list[str]],
+) -> Optional[str]:
+    """Resolve a wikilink target to a note_id using the pre-built suffix index.
+
+    O(1) lookups — no iteration over all notes.
+    Priority: exact match > suffix/path match > stem match.
+    """
+    # Exact match
+    if target in notes_by_id:
+        return target
+
+    norm_target = target.replace("\\", "/")
+
+    # Try with .md
+    if not norm_target.endswith(".md"):
+        with_md = norm_target + ".md"
+        if with_md in notes_by_id:
+            return with_md
+
+    # Suffix index lookup (includes path suffixes like "dir/foo.md" and "foo.md")
+    candidates = suffix_index.get(norm_target) or suffix_index.get(norm_target + ".md")
+    if candidates:
+        return candidates[0]  # already sorted by type priority
+
+    # Stem fallback (case-insensitive basename match)
+    stem = Path(norm_target).stem.lower()
+    stem_candidates = suffix_index.get(f"__stem__{stem}")
+    if stem_candidates:
+        return stem_candidates[0]
+
+    return None
+
+
 def _resolve_link(target: str, notes_by_id: dict[str, ParsedNote]) -> Optional[str]:
     """Resolve a wikilink target to a note_id.
 
-    Priority: exact match > suffix match (tool > concept > index).
+    Legacy O(N) version kept for call sites that don't have a suffix index.
+    Prefer _resolve_link_fast for bulk graph construction.
     """
     # Exact match
     if target in notes_by_id:
@@ -183,6 +249,7 @@ def _resolve_link(target: str, notes_by_id: dict[str, ParsedNote]) -> Optional[s
 def _build_graph_store(
     notes: list[ParsedNote],
     notes_by_id: dict[str, ParsedNote],
+    suffix_index: Optional[dict[str, list[str]]] = None,
 ) -> SimplePropertyGraphStore:
     """Build a SimplePropertyGraphStore from parsed notes.
 
@@ -200,6 +267,12 @@ def _build_graph_store(
     Non-code notes use LINKS_TO for all wikilinks.
     """
     graph_store = SimplePropertyGraphStore()
+
+    # Build suffix index once upfront for O(1) link resolution
+    _sidx = suffix_index if suffix_index is not None else _build_suffix_index(notes_by_id)
+
+    def _resolve(target: str) -> Optional[str]:
+        return _resolve_link_fast(target, notes_by_id, _sidx)
 
     entity_nodes: list[EntityNode] = []
     for note in notes:
@@ -233,7 +306,7 @@ def _build_graph_store(
 
             # Tier-1 (codeSymbol) → tier-2 (codeUnit): DEFINED_IN
             if note.tier == "1" and note.parent_file:
-                resolved = _resolve_link(note.parent_file, notes_by_id)
+                resolved = _resolve(note.parent_file)
                 if resolved and resolved != note.note_id:
                     relations.append(Relation(
                         label="DEFINED_IN",
@@ -249,7 +322,7 @@ def _build_graph_store(
 
             # Tier-2 (codeUnit) → tier-3 (codeModule): BELONGS_TO
             if note.tier == "2" and note.parent_module:
-                resolved = _resolve_link(note.parent_module, notes_by_id)
+                resolved = _resolve(note.parent_module)
                 if resolved and resolved != note.note_id:
                     relations.append(Relation(
                         label="BELONGS_TO",
@@ -265,7 +338,7 @@ def _build_graph_store(
 
             # --- Wikilink edges: CALLS (tier-1→tier-1) or IMPORTS (tier-2→tier-2) ---
             for link_target in note.links_out:
-                resolved = _resolve_link(link_target, notes_by_id)
+                resolved = _resolve(link_target)
                 if not resolved or resolved == note.note_id:
                     continue
                 target_note = notes_by_id.get(resolved)
@@ -301,7 +374,7 @@ def _build_graph_store(
         else:
             # Non-code notes: all wikilinks → LINKS_TO
             for link_target in note.links_out:
-                resolved = _resolve_link(link_target, notes_by_id)
+                resolved = _resolve(link_target)
                 if resolved and resolved != note.note_id:
                     relations.append(Relation(
                         label="LINKS_TO",

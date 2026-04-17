@@ -9,7 +9,9 @@ as startup failures instead of running in a partial mode.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import json
 import logging
 import os
 import time
@@ -18,11 +20,11 @@ from typing import Any, Callable, Optional
 
 from llama_index.core import VectorStoreIndex, Settings
 from llama_index.core.graph_stores import SimplePropertyGraphStore
-from llama_index.core.schema import TextNode, Document
+from llama_index.core.schema import TextNode
 
-from .indexer import build_index, load_index, _scan_md_db, _build_graph_store
+from .indexer import _scan_md_db, _build_graph_store, _build_suffix_index
 from .keyword_retriever import KeywordRetriever
-from .markdown_utils import compute_md_db_hash, normalize_token
+from .markdown_utils import normalize_token, IGNORED_DIRS
 from .models import ParsedNote, RetrievedNote
 from .providers import get_embed_config, check_reachable, create_embedding
 
@@ -32,6 +34,121 @@ log = logging.getLogger(__name__)
 def _content_hash(text: str) -> str:
     """Fast MD5 hash of note body text for change detection."""
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# File manifest — mtime/size snapshot for fast boot-time change detection
+# ---------------------------------------------------------------------------
+
+_MANIFEST_VERSION = 1
+_NOTES_CACHE_VERSION = 1
+
+
+def _scan_workspace_mtimes(md_db_path: str) -> dict[str, dict]:
+    """Walk workspace with os.scandir(), returning {rel_path: {mtime, size}}.
+
+    Uses DirEntry.stat() which on Windows returns cached attributes from
+    FindNextFile — no extra syscall per file, no content reads.
+    """
+    result: dict[str, dict] = {}
+
+    def _walk(dir_path: str) -> None:
+        try:
+            with os.scandir(dir_path) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in IGNORED_DIRS:
+                            _walk(entry.path)
+                    elif entry.name.endswith(".md"):
+                        try:
+                            st = entry.stat()
+                            rel = os.path.relpath(entry.path, md_db_path).replace("\\", "/")
+                            result[rel] = {"mtime": st.st_mtime, "size": st.st_size}
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+    _walk(md_db_path)
+    return result
+
+
+def _diff_manifest(
+    current: dict[str, dict],
+    manifest: dict[str, dict],
+) -> tuple[list[str], list[str]]:
+    """Compare current workspace scan against stored manifest.
+
+    Returns (changed_paths, deleted_paths) as lists of relative paths.
+    changed_paths = new files + files whose mtime or size changed.
+    deleted_paths = files in manifest that no longer exist.
+    """
+    changed: list[str] = []
+    deleted: list[str] = []
+
+    for rel, info in current.items():
+        prev = manifest.get(rel)
+        if prev is None or prev["mtime"] != info["mtime"] or prev["size"] != info["size"]:
+            changed.append(rel)
+
+    manifest_set = set(manifest.keys())
+    current_set = set(current.keys())
+    deleted = list(manifest_set - current_set)
+
+    return changed, deleted
+
+
+def _load_manifest(db_dir: str) -> dict[str, dict]:
+    """Load persisted file manifest. Returns empty dict if missing/corrupt."""
+    path = os.path.join(db_dir, "_file_manifest.json")
+    try:
+        data = json.loads(Path(path).read_text("utf-8"))
+        if data.get("v") == _MANIFEST_VERSION:
+            return data.get("files", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _save_manifest(db_dir: str, files: dict[str, dict]) -> None:
+    """Persist file manifest atomically."""
+    path = os.path.join(db_dir, "_file_manifest.json")
+    tmp = path + ".tmp"
+    try:
+        Path(tmp).write_text(json.dumps({"v": _MANIFEST_VERSION, "files": files}), "utf-8")
+        os.replace(tmp, path)
+    except Exception as exc:
+        log.warning("Failed to save file manifest: %s", exc)
+
+
+def _load_notes_cache(db_dir: str) -> dict[str, ParsedNote]:
+    """Load persisted parsed notes. Returns empty dict if missing/corrupt."""
+    path = os.path.join(db_dir, "_notes_cache.json")
+    try:
+        data = json.loads(Path(path).read_text("utf-8"))
+        if data.get("v") != _NOTES_CACHE_VERSION:
+            return {}
+        result: dict[str, ParsedNote] = {}
+        for rel, d in data.get("notes", {}).items():
+            try:
+                result[rel] = ParsedNote(**d)
+            except Exception:
+                return {}  # schema mismatch — full rebuild
+        return result
+    except Exception:
+        return {}
+
+
+def _save_notes_cache(db_dir: str, notes_by_id: dict[str, ParsedNote]) -> None:
+    """Persist parsed notes cache atomically."""
+    path = os.path.join(db_dir, "_notes_cache.json")
+    tmp = path + ".tmp"
+    try:
+        notes_data = {rel: dataclasses.asdict(note) for rel, note in notes_by_id.items()}
+        Path(tmp).write_text(json.dumps({"v": _NOTES_CACHE_VERSION, "notes": notes_data}), "utf-8")
+        os.replace(tmp, path)
+    except Exception as exc:
+        log.warning("Failed to save notes cache: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +190,12 @@ class KnowledgeGraphEngine:
         top_k: int = 8,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Boot the engine: scan notes, build graph, and build vector index.
+        """Boot the engine: scan notes, build graph, and build/load vector index.
+
+        Fast path (existing index + manifest): O(scandir) + load cached notes +
+        load vector index + incremental_update for changed files only.
+
+        Slow path (first boot or no index): full scan + embed + persist.
 
         Keyword args (backward compat):
             ollama_host: str — maps to embed config host override
@@ -89,41 +211,16 @@ class KnowledgeGraphEngine:
         # Ensure persistence dir exists
         os.makedirs(db_dir, exist_ok=True)
 
-        # ── Step 1: Scan + parse all notes (always — no provider needed) ─
-        notes = _scan_md_db(md_db_path)
-        notes_by_id = {n.note_id: n for n in notes}
-        self._parsed_notes = notes_by_id
-
-        # ── Step 2: Build graph store (always — no provider needed) ──────
-        self.graph_store = _build_graph_store(notes, notes_by_id)
-        # Persist graph store
-        self.graph_store.persist(
-            persist_path=os.path.join(db_dir, "property_graph_store.json")
-        )
-
-        # ── Step 3: Build keyword retriever (always) ────────────────────
-        self.keyword_retriever = KeywordRetriever(notes_by_id)
-
-        # ── Step 4: Build note cache + per-note hashes (always) ──────────
-        self.note_cache = {n.note_id: n.body for n in notes}
-        self._note_hashes = {n.note_id: _content_hash(n.body) for n in notes}
-
-        # ── Step 5: Resolve embed config ────────────────────────────────
+        # ── Resolve embed config (needed for both paths) ─────────────────
         embed_config = get_embed_config()
-
-        # Backward compat: TS may pass ollama_host/embed_model via kwargs
         if "ollama_host" in kwargs and kwargs["ollama_host"]:
             embed_config["host"] = kwargs["ollama_host"]
         if "embed_model" in kwargs and kwargs["embed_model"]:
             embed_config["model"] = kwargs["embed_model"]
 
-        # Store context_length for chunking in vector index builds
         self._embed_context_length: int = embed_config.get("context_length", 8192)
 
-        # ── Step 6: Create embedding model ──────────────────────────────
         embed_model_obj = create_embedding(embed_config)
-
-        # Disable LlamaIndex's default OpenAI LLM — we don't use it
         Settings.llm = None
 
         if embed_model_obj is None:
@@ -138,23 +235,136 @@ class KnowledgeGraphEngine:
             provider = embed_config.get("provider", "unknown")
             raise RuntimeError(f"Embedding provider '{provider}' unreachable at {host}")
 
-        # Provider available - build or load vector index.
         self.embed_model = embed_model_obj
         Settings.embed_model = embed_model_obj
-        self._build_or_load_vector_index(notes, notes_by_id, embed_model_obj)
 
-        duration_ms = int((time.time() - t0) * 1000)
-        log.info(
-            "Initialized (full) in %dms — %d notes",
-            duration_ms,
-            len(notes),
+        # ── Choose fast or slow path ──────────────────────────────────────
+        manifest = _load_manifest(db_dir)
+        notes_cache = _load_notes_cache(db_dir)
+        has_index = self._has_persisted_index()
+
+        if has_index and manifest and notes_cache:
+            result = self._initialize_fast(embed_model_obj, manifest, notes_cache, t0)
+        else:
+            result = self._initialize_slow(embed_model_obj, t0)
+
+        return result
+
+    def _initialize_slow(self, embed_model_obj: Any, t0: float) -> dict[str, Any]:
+        """Full rebuild: scan all files, embed all notes, persist everything."""
+        md_db_path = self.md_db_path
+        db_dir = self.db_dir
+
+        # Scan + parse all notes
+        notes = _scan_md_db(md_db_path)
+        notes_by_id = {n.note_id: n for n in notes}
+        self._parsed_notes = notes_by_id
+
+        # Build graph store
+        suffix_index = _build_suffix_index(notes_by_id)
+        self.graph_store = _build_graph_store(notes, notes_by_id, suffix_index)
+        self.graph_store.persist(
+            persist_path=os.path.join(db_dir, "property_graph_store.json")
         )
 
+        # Keyword retriever
+        self.keyword_retriever = KeywordRetriever(notes_by_id)
+
+        # Note cache + hashes
+        self.note_cache = {n.note_id: n.body for n in notes}
+        self._note_hashes = {n.note_id: _content_hash(n.body) for n in notes}
+
+        # Build vector index (full embed)
+        from .indexer import _build_vector_index
+        self.index = _build_vector_index(notes, embed_model_obj, db_dir, self._embed_context_length)
+
+        # Persist manifest + notes cache so next boot takes the fast path
+        current_mtimes = _scan_workspace_mtimes(md_db_path)
+        _save_manifest(db_dir, current_mtimes)
+        _save_notes_cache(db_dir, notes_by_id)
+
+        duration_ms = int((time.time() - t0) * 1000)
+        log.info("Initialized (slow/full) in %dms — %d notes", duration_ms, len(notes))
         return {
-            "path": "full",
+            "path": "slow",
             "mode": "full",
             "duration_ms": duration_ms,
             "note_count": len(notes),
+            "note_cache": self.note_cache,
+        }
+
+    def _initialize_fast(
+        self,
+        embed_model_obj: Any,
+        manifest: dict[str, dict],
+        notes_cache: dict[str, ParsedNote],
+        t0: float,
+    ) -> dict[str, Any]:
+        """Fast path: scandir → diff → load index → incremental_update for changed files.
+
+        No file content is read for unchanged files. Only changed/new files are
+        re-parsed and re-embedded.
+        """
+        md_db_path = self.md_db_path
+        db_dir = self.db_dir
+
+        # Step 1: scandir (mtime/size only — no content reads)
+        t_scan = time.time()
+        current_mtimes = _scan_workspace_mtimes(md_db_path)
+        changed_paths, deleted_paths = _diff_manifest(current_mtimes, manifest)
+        log.info(
+            "Boot diff in %.0fms: %d changed, %d deleted of %d files",
+            (time.time() - t_scan) * 1000,
+            len(changed_paths), len(deleted_paths), len(current_mtimes),
+        )
+
+        # Step 2: Populate engine state from notes cache (no file reads)
+        self._parsed_notes = notes_cache
+        self.note_cache = {rel: note.body for rel, note in notes_cache.items()}
+        self._note_hashes = {rel: _content_hash(note.body) for rel, note in notes_cache.items()}
+
+        # Step 3: Load persisted vector index
+        self.index = self._load_vector_index_only(embed_model_obj)
+        log.info("Loaded vector index from disk")
+
+        # Step 4: Apply catch-up changes (files that changed while daemon was off).
+        # incremental_update rebuilds graph store + keyword retriever internally,
+        # so we defer those until after the update to avoid building them twice.
+        if changed_paths or deleted_paths:
+            log.info(
+                "Applying %d changed + %d deleted files from last shutdown",
+                len(changed_paths), len(deleted_paths),
+            )
+            # Stub graph store so incremental_update can proceed (it will rebuild it)
+            self.graph_store = SimplePropertyGraphStore()
+            self.keyword_retriever = KeywordRetriever(self._parsed_notes)
+            self.incremental_update(
+                changed_paths=changed_paths,
+                deleted_paths=deleted_paths,
+                progress_cb=None,
+            )
+            # incremental_update already saved manifest + notes cache
+        else:
+            # No catch-up needed — build graph store from cached notes
+            all_notes = list(self._parsed_notes.values())
+            suffix_index = _build_suffix_index(self._parsed_notes)
+            self.graph_store = _build_graph_store(all_notes, self._parsed_notes, suffix_index)
+            self.keyword_retriever = KeywordRetriever(self._parsed_notes)
+            # Refresh manifest so mtime drift (touch without edit) doesn't re-read
+            # those files on the next boot.
+            _save_manifest(db_dir, current_mtimes)
+
+        duration_ms = int((time.time() - t0) * 1000)
+        changed_count = len(changed_paths) + len(deleted_paths)
+        log.info(
+            "Initialized (fast) in %dms — %d cached + %d updated notes",
+            duration_ms, len(self._parsed_notes), changed_count,
+        )
+        return {
+            "path": "fast",
+            "mode": "full",
+            "duration_ms": duration_ms,
+            "note_count": len(self._parsed_notes),
             "note_cache": self.note_cache,
         }
 
@@ -252,59 +462,41 @@ class KnowledgeGraphEngine:
     # ------------------------------------------------------------------
 
     def reindex(self) -> dict[str, Any]:
-        """Re-scan md_db and rebuild if changed."""
+        """Diff workspace against manifest and apply any changes.
+
+        Replaces the old full-content-hash approach: uses mtime/size manifest
+        for O(scandir) change detection, then incremental_update for changed files.
+        Falls back to a full rebuild if the engine has no in-memory state.
+        """
         if not self.md_db_path:
             raise RuntimeError("Engine not initialized")
 
         t0 = time.time()
-        current_hash = compute_md_db_hash(self.md_db_path)
-        hash_path = os.path.join(self.db_dir, ".md_db_hash")
-        stored_hash = ""
-        if os.path.exists(hash_path):
-            stored_hash = Path(hash_path).read_text().strip()
 
-        # Skip only if hash matches AND in-memory state is populated.
-        # After unregister+reregister of the same workspace, the hash may
-        # match but _parsed_notes was cleared — must rebuild in that case.
-        if current_hash == stored_hash and len(self._parsed_notes) > 0:
+        if not self._parsed_notes:
+            # No in-memory state — treat as first boot
+            return self._initialize_slow(self.embed_model, t0)
+
+        # Diff workspace against persisted manifest
+        manifest = _load_manifest(self.db_dir)
+        current_mtimes = _scan_workspace_mtimes(self.md_db_path)
+        changed_paths, deleted_paths = _diff_manifest(current_mtimes, manifest)
+
+        if not changed_paths and not deleted_paths:
             return {
                 "skipped": True,
                 "duration_ms": int((time.time() - t0) * 1000),
-                "note_count": len(self.note_cache),
+                "note_count": len(self._parsed_notes),
                 "note_cache": self.note_cache,
             }
 
-        # Always re-scan notes and rebuild graph + keyword retriever
-        notes = _scan_md_db(self.md_db_path)
-        notes_by_id = {n.note_id: n for n in notes}
-        self._parsed_notes = notes_by_id
-        self.graph_store = _build_graph_store(notes, notes_by_id)
-        self.graph_store.persist(
-            persist_path=os.path.join(self.db_dir, "property_graph_store.json")
+        result = self.incremental_update(
+            changed_paths=changed_paths,
+            deleted_paths=deleted_paths,
+            progress_cb=None,
         )
-        self.keyword_retriever = KeywordRetriever(notes_by_id)
-        self.note_cache = {n.note_id: n.body for n in notes}
-
-        # Rebuild vector index (required in strict mode)
-        if self.embed_model is None:
-            raise RuntimeError("Embedding model not initialized; cannot rebuild index")
-
-        try:
-            from .indexer import _build_vector_index
-            self.index = _build_vector_index(notes, self.embed_model, self.db_dir, self._embed_context_length)
-        except Exception as exc:
-            raise RuntimeError(f"Vector index rebuild failed: {exc}") from exc
-
-        # Update hash
-        Path(hash_path).write_text(current_hash)
-
-        duration_ms = int((time.time() - t0) * 1000)
-        return {
-            "skipped": False,
-            "duration_ms": duration_ms,
-            "note_count": len(notes),
-            "note_cache": self.note_cache,
-        }
+        result["skipped"] = False
+        return result
 
     # ------------------------------------------------------------------
     # Incremental update
@@ -467,21 +659,24 @@ class KnowledgeGraphEngine:
             if progress_cb:
                 progress_cb(_idx + 1, total_changed)
 
-        # ── Rebuild graph store (cheap — no embeddings) ──────────────────
-        # Graph edges depend on cross-note wikilinks, so after any note
-        # changes we rebuild the full graph. This is fast (~10ms for 70
-        # notes) since it's just in-memory data structure manipulation.
+        # ── Rebuild graph store + keyword index ──────────────────────────
         if added + updated + removed > 0:
             all_notes = list(self._parsed_notes.values())
-            self.graph_store = _build_graph_store(all_notes, self._parsed_notes)
+            suffix_index = _build_suffix_index(self._parsed_notes)
+            self.graph_store = _build_graph_store(all_notes, self._parsed_notes, suffix_index)
             self.graph_store.persist(
                 persist_path=os.path.join(self.db_dir, "property_graph_store.json")
             )
             self.keyword_retriever = KeywordRetriever(self._parsed_notes)
 
-            # Persist vector index if it exists
+            # Persist vector index
             if self.index is not None:
                 self.index.storage_context.persist(persist_dir=self.db_dir)
+
+            # Update manifest and notes cache so next boot stays on the fast path
+            current_mtimes = _scan_workspace_mtimes(self.md_db_path)
+            _save_manifest(self.db_dir, current_mtimes)
+            _save_notes_cache(self.db_dir, self._parsed_notes)
 
         duration_ms = int((time.time() - t0) * 1000)
         total = added + updated + removed
@@ -504,14 +699,6 @@ class KnowledgeGraphEngine:
         self._parsed_notes.pop(note_id, None)
         self.note_cache.pop(note_id, None)
         self._note_hashes.pop(note_id, None)
-
-        # Invalidate persisted hash so next reindex() doesn't skip
-        hash_path = os.path.join(self.db_dir, ".md_db_hash")
-        try:
-            if os.path.exists(hash_path):
-                os.remove(hash_path)
-        except OSError:
-            pass
 
         # Remove from vector index
         if self.index is not None:
@@ -705,30 +892,6 @@ class KnowledgeGraphEngine:
             os.path.exists(os.path.join(self.db_dir, "property_graph_store.json"))
             and os.path.exists(os.path.join(self.db_dir, "docstore.json"))
         )
-
-    def _build_or_load_vector_index(
-        self,
-        notes: list[ParsedNote],
-        notes_by_id: dict[str, ParsedNote],
-        embed_model: Any,
-    ) -> None:
-        """Hash-based fast/slow path for vector index."""
-        current_hash = compute_md_db_hash(self.md_db_path)
-        hash_path = os.path.join(self.db_dir, ".md_db_hash")
-        stored_hash = ""
-        if os.path.exists(hash_path):
-            stored_hash = Path(hash_path).read_text().strip()
-
-        if current_hash == stored_hash and self._has_persisted_index():
-            # Fast path: load from disk
-            self.index = self._load_vector_index_only(embed_model)
-            log.info("Loaded vector index from cache (fast path)")
-        else:
-            # Slow path: full rebuild
-            from .indexer import _build_vector_index
-            self.index = _build_vector_index(notes, embed_model, self.db_dir, self._embed_context_length)
-            Path(hash_path).write_text(current_hash)
-            log.info("Built vector index (slow path)")
 
     def _load_vector_index_only(self, embed_model: Any) -> VectorStoreIndex:
         """Load persisted VectorStoreIndex from disk."""

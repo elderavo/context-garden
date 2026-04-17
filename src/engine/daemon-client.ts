@@ -125,7 +125,7 @@ export class DaemonClient {
 
       sock.on("connect", () => {
         clearTimeout(timer);
-        sock.destroy();
+        sock.end(); // FIN, not RST — lets Python detect EOF cleanly
         resolve();
       });
 
