@@ -61,13 +61,21 @@ export function resolveToken(config: GitLabConfig): string | undefined {
 // ---------------------------------------------------------------------------
 
 /**
- * Build an authenticated HTTPS clone URL by embedding oauth2 credentials.
+ * Build a clone URL, embedding oauth2 credentials for HTTPS remotes.
  *
- * "https://gitlab.home.lab/org/repo" → "https://oauth2:{token}@gitlab.home.lab/org/repo.git"
+ * SSH URLs (git@host:org/repo or ssh://git@host/org/repo) are returned
+ * unchanged — SSH auth is handled by the OS key agent, not by credentials
+ * in the URL.
  *
- * If no token is provided the URL is returned as-is (suitable for public repos).
+ * HTTPS: "https://gitlab.home.lab/org/repo" → "https://oauth2:{token}@gitlab.home.lab/org/repo.git"
+ * SSH:   "git@gitlab.home.lab:org/repo"     → "git@gitlab.home.lab:org/repo.git" (unchanged)
  */
 export function buildAuthUrl(projectUrl: string, token: string | undefined): string {
+  // SSH URL — pass through as-is (SCP-style git@ or ssh:// scheme).
+  if (projectUrl.startsWith("git@") || projectUrl.startsWith("ssh://")) {
+    return projectUrl.endsWith(".git") ? projectUrl : `${projectUrl}.git`;
+  }
+
   const normalized = projectUrl.endsWith(".git") ? projectUrl : `${projectUrl}.git`;
   if (!token) return normalized;
 
