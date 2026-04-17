@@ -18,7 +18,7 @@
  */
 
 import express from "express";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, rmSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
@@ -64,6 +64,10 @@ function loadWorkspaces(): WorkspaceEntry[] {
   } catch {
     return [];
   }
+}
+
+function saveWorkspaces(entries: WorkspaceEntry[]): void {
+  writeFileSync(WORKSPACES_PATH, JSON.stringify(entries, null, 2), "utf-8");
 }
 
 // ---------------------------------------------------------------------------
@@ -168,17 +172,55 @@ app.post("/workspaces/:id/index", (req, res) => {
   res.status(202).json({ jobId: job.id, status: job.status });
 });
 
-// POST /workspaces/:id/unregister — kept for dashboard compatibility
-app.post("/api/workspaces/:id/unregister", async (req, res) => {
+// Shared handler for unregistering a workspace:
+// 1. Remove from workspaces.json
+// 2. Delete the mirror dir under md_db/code/<name>
+// 3. For gitlab workspaces, also delete the clone dir
+// 4. Tell the daemon to unregister (in-memory removal)
+async function handleUnregister(id: string, res: express.Response): Promise<void> {
   try {
+    const workspaces = loadWorkspaces();
+    const idx = workspaces.findIndex((w) => w.id === id);
+    if (idx === -1) {
+      res.status(404).json({ error: "Workspace not found" });
+      return;
+    }
+
+    const entry = workspaces[idx]!;
+
+    // Remove from workspaces.json first so it won't be re-registered on reconnect.
+    const updated = [...workspaces.slice(0, idx), ...workspaces.slice(idx + 1)];
+    saveWorkspaces(updated);
+
+    // Delete mirror dir: .context-garden/md_db/code/<name>
+    const mirrorDir = join(DATA_DIR, ".context-garden", "md_db", "code", entry.name);
+    rmSync(mirrorDir, { recursive: true, force: true });
+
+    // For gitlab workspaces, also delete the clone dir.
+    if (entry.sourceType === "gitlab" && entry.gitlabConfig?.cloneDir) {
+      rmSync(entry.gitlabConfig.cloneDir, { recursive: true, force: true });
+    }
+
+    // Remove from the daemon's in-memory registry.
     const result = await daemonRpc("workspaces.unregister", {
-      workspace_id: req.params["id"],
+      workspace_id: id,
       delete_data: false,
     });
+
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+}
+
+// POST /api/workspaces/:id/unregister — kept for dashboard compatibility
+app.post("/api/workspaces/:id/unregister", (req, res) => {
+  void handleUnregister(req.params["id"]!, res);
+});
+
+// POST /workspaces/:id/unregister — canonical path (no /api prefix)
+app.post("/workspaces/:id/unregister", (req, res) => {
+  void handleUnregister(req.params["id"]!, res);
 });
 
 // ---------------------------------------------------------------------------
