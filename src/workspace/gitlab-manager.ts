@@ -29,6 +29,12 @@ export interface GitLabConfig {
   accessToken?: string;
   /** Absolute path to the local clone. Set at registration time. */
   cloneDir: string;
+  /**
+   * Shared secret used to verify incoming GitLab webhooks.
+   * Generated at registration time. Configure as the "Secret token" in
+   * GitLab → Settings → Webhooks.
+   */
+  webhookSecret: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,14 +148,19 @@ export async function cloneRepo(config: GitLabConfig, token: string | undefined)
 }
 
 /**
- * Pull the latest commits from origin into an existing clone.
+ * Converge the local clone to the remote branch state via fetch + reset --hard.
  *
- * Updates the remote URL first so that a changed/rotated token takes effect
- * without needing to re-register the workspace.
+ * Preferred over `git pull` for managed mirrors:
+ *   - Idempotent: running it twice produces the same result.
+ *   - No merge conflicts: always matches remote exactly.
+ *   - Works correctly on shallow clones.
+ *
+ * Updates the remote URL first so a rotated token takes effect without
+ * re-registering the workspace.
  */
-export async function pullRepo(config: GitLabConfig, token: string | undefined): Promise<void> {
+export async function fetchAndReset(config: GitLabConfig, token: string | undefined): Promise<void> {
   const authUrl = buildAuthUrl(config.projectUrl, token);
-  // Update remote URL in case the token rotated since last sync.
   await runGit(["remote", "set-url", "origin", authUrl], config.cloneDir);
-  await runGit(["pull", "--ff-only", "origin", config.branch], config.cloneDir);
+  await runGit(["fetch", "origin", config.branch], config.cloneDir);
+  await runGit(["reset", "--hard", `origin/${config.branch}`], config.cloneDir);
 }

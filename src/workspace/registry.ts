@@ -7,7 +7,7 @@
  * Registry persists to `.context-garden/workspaces.json`.
  */
 
-import { randomUUID } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { dirname, join, relative, resolve } from "path";
 import type { FSWatcher } from "chokidar";
@@ -21,7 +21,7 @@ import {
 } from "../mirror/language-registry.js";
 import {
   cloneRepo,
-  pullRepo,
+  fetchAndReset,
   resolveToken,
   type GitLabConfig,
 } from "./gitlab-manager.js";
@@ -380,9 +380,10 @@ export class WorkspaceRegistry {
       throw new Error(`gitlabConfig is required when sourceType is "gitlab"`);
     }
 
-    // Resolve clone dir and bake it into gitlabConfig before persisting.
+    // Resolve clone dir and generate webhook secret, bake both into gitlabConfig before persisting.
     const cloneDir = join(this.dataDir, ".context-garden", "clones", input.name);
-    const gitlabConfig: GitLabConfig = { ...input.gitlabConfig, cloneDir };
+    const webhookSecret = input.gitlabConfig.webhookSecret || randomBytes(32).toString("hex");
+    const gitlabConfig: GitLabConfig = { ...input.gitlabConfig, cloneDir, webhookSecret };
 
     const token = resolveToken(gitlabConfig);
     process.stderr.write(`[registry] Cloning ${gitlabConfig.projectUrl} → ${cloneDir}\n`);
@@ -428,8 +429,8 @@ export class WorkspaceRegistry {
     }
 
     const token = resolveToken(entry.gitlabConfig);
-    process.stderr.write(`[registry] Pulling ${entry.gitlabConfig.projectUrl} (${entry.gitlabConfig.branch})\n`);
-    await pullRepo(entry.gitlabConfig, token);
+    process.stderr.write(`[registry] Fetching ${entry.gitlabConfig.projectUrl} (${entry.gitlabConfig.branch})\n`);
+    await fetchAndReset(entry.gitlabConfig, token);
 
     const mirrorDir = this.mirrorDir(entry);
     await runWorkspaceMirror({

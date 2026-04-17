@@ -1,88 +1,226 @@
 /**
- * ContextGarden Webapp Server
+ * ContextGarden Control Plane
  *
- * Thin Express bridge between the browser and the Python daemon's TCP JSON-RPC.
- * Does NOT use DaemonClient (which auto-spawns) — status checks use direct probes
- * so we can distinguish "stopped" from errors. Only /api/daemon/start triggers spawn.
+ * Evolves the monitoring webapp into a proper control plane:
+ *   - Receives GitLab push webhooks and enqueues sync jobs
+ *   - Exposes manual sync/index triggers per workspace
+ *   - Shows job queue status and logs
+ *   - Manages daemon lifecycle (start/stop)
+ *   - Serves the monitoring dashboard
+ *
+ * Architecture:
+ *   GitLab → POST /webhooks/gitlab → job queue → worker (fetch+reset, mirror, reindex)
+ *   Browser → GET / → dashboard
+ *   Agent/script → POST /workspaces/:id/sync|index → job queue
  *
  * Run: npm run webapp
  * Opens: http://localhost:7433
  */
 
 import express from "express";
-import { createConnection } from "net";
-import { randomUUID } from "crypto";
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
 import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { dirname } from "path";
 import { DaemonClient, resolvePythonPath } from "../src/engine/daemon-client.js";
+import { daemonRpc } from "./daemon-rpc.js";
+import { initJobs, enqueueSync, enqueueIndex, listJobs, getJob } from "./jobs.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const WEBAPP_PORT = 7433;
-const DAEMON_PORT = 7432;
-const DATA_DIR = process.cwd();
+const WEBAPP_PORT = parseInt(process.env["CG_WEBAPP_PORT"] ?? "7433", 10);
+const DATA_DIR = process.env["CG_DATA_DIR"] ?? process.cwd();
 const PYTHON_CACHE = join(DATA_DIR, ".context-garden", "python_path.txt");
-const RPC_TIMEOUT_MS = 5_000;
+const WORKSPACES_PATH = join(DATA_DIR, ".context-garden", "workspaces.json");
 
-// ── Direct TCP JSON-RPC (no auto-spawn, no reconnect) ───────────────────────
+// ---------------------------------------------------------------------------
+// Workspace helpers (reads workspaces.json directly — no registry class)
+// ---------------------------------------------------------------------------
 
-async function daemonRpc(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const sock = createConnection({ port: DAEMON_PORT, host: "127.0.0.1" });
-    const id = randomUUID();
-    let buf = "";
-
-    const timer = setTimeout(() => {
-      sock.destroy();
-      reject(new Error(`RPC timeout: ${method}`));
-    }, RPC_TIMEOUT_MS);
-
-    sock.on("connect", () => {
-      sock.write(JSON.stringify({ id, method, params }) + "\n");
-    });
-
-    sock.on("data", (chunk) => {
-      buf += chunk.toString("utf-8");
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const data = JSON.parse(line) as { id?: string; result?: unknown; error?: { message: string } };
-          if (data.id === id) {
-            clearTimeout(timer);
-            sock.destroy();
-            if (data.error) reject(new Error(data.error.message));
-            else resolve(data.result);
-          }
-        } catch {
-          // ignore non-JSON lines
-        }
-      }
-    });
-
-    sock.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-
-    sock.on("close", () => {
-      clearTimeout(timer);
-      reject(new Error("Connection closed before response"));
-    });
-  });
+interface GitLabConfig {
+  projectUrl: string;
+  branch: string;
+  accessToken?: string;
+  cloneDir: string;
+  webhookSecret: string;
 }
 
-// ── Express app ──────────────────────────────────────────────────────────────
+interface WorkspaceEntry {
+  id: string;
+  name: string;
+  sourceDir: string;
+  languages: string[];
+  active: boolean;
+  registeredAt: string;
+  sourceType?: "local" | "gitlab";
+  gitlabConfig?: GitLabConfig;
+}
+
+function loadWorkspaces(): WorkspaceEntry[] {
+  if (!existsSync(WORKSPACES_PATH)) return [];
+  try {
+    return JSON.parse(readFileSync(WORKSPACES_PATH, "utf-8")) as WorkspaceEntry[];
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+initJobs(DATA_DIR);
+
+// ---------------------------------------------------------------------------
+// Express app
+// ---------------------------------------------------------------------------
 
 const app = express();
 app.use(express.json());
-
-// Serve the dashboard HTML
 app.use(express.static(__dirname));
 
-// GET /api/status — single daemon.health RPC (includes workspaces + active_connections)
+// ---------------------------------------------------------------------------
+// Webhook: POST /webhooks/gitlab
+//
+// Single endpoint for all GitLab push events. The webhook secret in the
+// X-Gitlab-Token header identifies which workspace the event belongs to.
+// ---------------------------------------------------------------------------
+
+app.post("/webhooks/gitlab", (req, res) => {
+  const token = req.headers["x-gitlab-token"];
+  if (typeof token !== "string" || !token) {
+    res.status(401).json({ error: "Missing X-Gitlab-Token header" });
+    return;
+  }
+
+  const workspaces = loadWorkspaces();
+  const entry = workspaces.find(
+    (w) => w.sourceType === "gitlab" && w.gitlabConfig?.webhookSecret === token,
+  );
+
+  if (!entry) {
+    // Return 401 rather than 404 so GitLab doesn't infer workspace names from timing.
+    res.status(401).json({ error: "Unknown webhook token" });
+    return;
+  }
+
+  // Check that the push is for the tracked branch.
+  const payload = req.body as { ref?: string; object_kind?: string };
+  const expectedRef = `refs/heads/${entry.gitlabConfig!.branch}`;
+  if (payload.ref && payload.ref !== expectedRef) {
+    res.status(200).json({ status: "ignored", reason: `push was to ${payload.ref}, tracking ${expectedRef}` });
+    return;
+  }
+
+  // Respond immediately — enqueue the work.
+  const job = enqueueSync(entry.id, entry.name, "webhook");
+  res.status(202).json({ status: "accepted", jobId: job.id, workspaceName: entry.name });
+});
+
+// ---------------------------------------------------------------------------
+// Workspace routes
+// ---------------------------------------------------------------------------
+
+// GET /workspaces — list all workspaces with their status
+app.get("/workspaces", (_req, res) => {
+  const workspaces = loadWorkspaces();
+  const jobs = listJobs();
+
+  const result = workspaces.map((w) => {
+    const lastJob = jobs.find((j) => j.workspaceId === w.id);
+    return {
+      id: w.id,
+      name: w.name,
+      sourceType: w.sourceType ?? "local",
+      active: w.active,
+      registeredAt: w.registeredAt,
+      source: w.sourceType === "gitlab" ? w.gitlabConfig?.projectUrl : w.sourceDir,
+      branch: w.gitlabConfig?.branch,
+      lastSync: lastJob
+        ? { status: lastJob.status, completedAt: lastJob.completedAt ?? null }
+        : null,
+    };
+  });
+
+  res.json(result);
+});
+
+// POST /workspaces/:id/sync — manually trigger a sync job
+app.post("/workspaces/:id/sync", (req, res) => {
+  const entry = loadWorkspaces().find((w) => w.id === req.params["id"]);
+  if (!entry) { res.status(404).json({ error: "Workspace not found" }); return; }
+  if (entry.sourceType !== "gitlab") {
+    res.status(400).json({ error: "Only GitLab workspaces support sync" });
+    return;
+  }
+
+  const job = enqueueSync(entry.id, entry.name, "manual");
+  res.status(202).json({ jobId: job.id, status: job.status });
+});
+
+// POST /workspaces/:id/index — manually trigger a reindex job
+app.post("/workspaces/:id/index", (req, res) => {
+  const entry = loadWorkspaces().find((w) => w.id === req.params["id"]);
+  if (!entry) { res.status(404).json({ error: "Workspace not found" }); return; }
+
+  const job = enqueueIndex(entry.id, entry.name, "manual");
+  res.status(202).json({ jobId: job.id, status: job.status });
+});
+
+// POST /workspaces/:id/unregister — kept for dashboard compatibility
+app.post("/api/workspaces/:id/unregister", async (req, res) => {
+  try {
+    const result = await daemonRpc("workspaces.unregister", {
+      workspace_id: req.params["id"],
+      delete_data: false,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Job routes
+// ---------------------------------------------------------------------------
+
+// GET /jobs — list recent jobs (newest first)
+app.get("/jobs", (_req, res) => {
+  res.json(listJobs().map((j) => ({
+    id: j.id,
+    type: j.type,
+    workspaceName: j.workspaceName,
+    triggeredBy: j.triggeredBy,
+    status: j.status,
+    createdAt: j.createdAt,
+    startedAt: j.startedAt ?? null,
+    completedAt: j.completedAt ?? null,
+  })));
+});
+
+// GET /jobs/:id — full job detail including log
+app.get("/jobs/:id", (req, res) => {
+  const job = getJob(req.params["id"]);
+  if (!job) { res.status(404).json({ error: "Job not found" }); return; }
+  res.json(job);
+});
+
+// ---------------------------------------------------------------------------
+// Daemon routes
+// ---------------------------------------------------------------------------
+
+// GET /status — daemon health (includes workspaces + connections)
+app.get("/status", async (_req, res) => {
+  try {
+    const health = await daemonRpc("daemon.health", {});
+    res.json(health);
+  } catch {
+    res.json({ status: "stopped" });
+  }
+});
+
+// Keep legacy path for existing dashboard clients
 app.get("/api/status", async (_req, res) => {
   try {
     const health = await daemonRpc("daemon.health", {});
@@ -92,19 +230,7 @@ app.get("/api/status", async (_req, res) => {
   }
 });
 
-// POST /api/workspaces/:id/unregister
-app.post("/api/workspaces/:id/unregister", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const result = await daemonRpc("workspaces.unregister", { workspace_id: id, delete_data: false });
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-// POST /api/daemon/stop — send shutdown RPC
-app.post("/api/daemon/stop", async (_req, res) => {
+app.post("/daemon/stop", async (_req, res) => {
   try {
     const result = await daemonRpc("daemon.shutdown", {});
     res.json(result);
@@ -113,8 +239,7 @@ app.post("/api/daemon/stop", async (_req, res) => {
   }
 });
 
-// POST /api/daemon/start — spawn via DaemonClient (handles Python env resolution)
-app.post("/api/daemon/start", async (_req, res) => {
+app.post("/daemon/start", async (_req, res) => {
   try {
     let pythonPath: string;
     try {
@@ -133,6 +258,27 @@ app.post("/api/daemon/start", async (_req, res) => {
   }
 });
 
+// Legacy paths for existing dashboard
+app.post("/api/daemon/stop", async (_req, res) => {
+  try { res.json(await daemonRpc("daemon.shutdown", {})); }
+  catch (err) { res.status(500).json({ error: String(err) }); }
+});
+app.post("/api/daemon/start", async (_req, res) => {
+  try {
+    let pythonPath: string;
+    try { pythonPath = resolvePythonPath(PYTHON_CACHE); } catch { pythonPath = "python"; }
+    const client = new DaemonClient(pythonPath, DATA_DIR, DATA_DIR);
+    await client.connect();
+    client.close();
+    res.json(await daemonRpc("daemon.health", {}));
+  } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+
 app.listen(WEBAPP_PORT, () => {
-  console.log(`ContextGarden dashboard → http://localhost:${WEBAPP_PORT}`);
+  console.log(`ContextGarden control plane → http://localhost:${WEBAPP_PORT}`);
+  console.log(`  Webhook endpoint: POST http://localhost:${WEBAPP_PORT}/webhooks/gitlab`);
 });
