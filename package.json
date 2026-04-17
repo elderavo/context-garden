@@ -6,7 +6,8 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "context-garden": "./dist/bin/context-garden.js"
+    "context-garden": "./dist/bin/context-garden.js",
+    "cg-sync": "./dist/bin/cg-sync.js"
   },
   "scripts": {
     "build": "tsc",

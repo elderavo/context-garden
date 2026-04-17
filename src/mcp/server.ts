@@ -166,16 +166,31 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
     "register_workspace",
     {
       description:
-        "Register a source directory as a workspace for code mirroring. " +
-        "Runs an initial mirror pass and starts a file watcher for continuous updates. " +
+        "Register a workspace for code mirroring. " +
+        "Pass gitlab_url to register a GitLab-backed repo (recommended). " +
+        "The repo is cloned once; subsequent updates flow via the post-receive SSH hook. " +
+        "Pass source_dir to register a local directory (deprecated — prefer gitlab_url). " +
         "Mirrored notes become available via retrieve_context.",
       inputSchema: {
         name: z.string().describe("Unique slug (lowercase alphanumeric + hyphens, 2-64 chars)."),
-        source_dir: z.string().describe("Absolute path to the source directory to mirror."),
+        gitlab_url: z.string().optional().describe(
+          "GitLab project URL, e.g. \"https://gitlab.home.lab/org/repo\". " +
+          "When provided, source_dir is ignored and the repo is cloned into the CG data directory."
+        ),
+        gitlab_branch: z.string().optional().default("main").describe(
+          "Branch to track. Defaults to \"main\". Only used when gitlab_url is set."
+        ),
+        gitlab_token: z.string().optional().describe(
+          "GitLab personal access token for cloning. " +
+          "Falls back to CG_GITLAB_TOKEN in ~/.context-garden/.env when omitted."
+        ),
+        source_dir: z.string().optional().describe(
+          "[DEPRECATED — prefer gitlab_url] Absolute path to a local source directory to mirror."
+        ),
         languages: z.array(languageIdSchema).default(defaultLanguageList).describe("Which languages to mirror. Default: first registered language."),
       },
     },
-    async ({ name, source_dir, languages }) => {
+    async ({ name, gitlab_url, gitlab_branch, gitlab_token, source_dir, languages }) => {
       if (!workspaceRegistry) {
         return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
       }
@@ -185,13 +200,38 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
         return { content: [{ type: "text" as const, text: "At least one language must be specified." }] };
       }
 
+      if (!gitlab_url && !source_dir) {
+        return { content: [{ type: "text" as const, text: "Provide either gitlab_url or source_dir." }] };
+      }
+
       try {
-        const { entry, notesGenerated, notePaths } = await workspaceRegistry.register({
-          name,
-          sourceDir: source_dir,
-          languages: uniqueLanguages,
-          active: true,
-        });
+        let registrationInput: Parameters<typeof workspaceRegistry.register>[0];
+
+        if (gitlab_url) {
+          registrationInput = {
+            name,
+            sourceDir: "",  // overwritten by _registerGitLab once clone dir is known
+            languages: uniqueLanguages,
+            active: true,
+            sourceType: "gitlab",
+            gitlabConfig: {
+              projectUrl: gitlab_url,
+              branch: gitlab_branch ?? "main",
+              accessToken: gitlab_token,
+              cloneDir: "",  // overwritten by _registerGitLab
+            },
+          };
+        } else {
+          registrationInput = {
+            name,
+            sourceDir: source_dir!,
+            languages: uniqueLanguages,
+            active: true,
+            sourceType: "local",
+          };
+        }
+
+        const { entry, notesGenerated } = await workspaceRegistry.register(registrationInput);
 
         // Register the mirror dir with the daemon, then reindex just this workspace.
         const mirrorDir = workspaceRegistry.mirrorDir(entry);
@@ -200,6 +240,26 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
           .catch((err) => {
             onBackgroundError?.("daemon workspace registration after register_workspace", err);
           });
+
+        if (entry.sourceType === "gitlab") {
+          const projectUrl = entry.gitlabConfig!.projectUrl;
+          const branch = entry.gitlabConfig!.branch;
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Workspace "${entry.name}" registered (GitLab).\n` +
+                `Project: ${projectUrl} @ ${branch}\n` +
+                `Clone: ${entry.sourceDir}\n` +
+                `Languages: ${entry.languages.join(", ")}\n` +
+                `Notes generated: ${notesGenerated}\n` +
+                `Indexing: running in background\n\n` +
+                `To complete setup, add a post-receive hook on your GitLab server:\n` +
+                `  Target repo → Settings → Hooks  (or use a server-side hook)\n` +
+                `  Command: ssh -i /path/to/cg_key cg-user@<cg-host> "cg-sync ${entry.name}"\n` +
+                `  Filter: refs/heads/${branch} only`,
+            }],
+          };
+        }
 
         return {
           content: [{
@@ -233,11 +293,17 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
         return { content: [{ type: "text" as const, text: "No workspaces registered." }] };
       }
       const lines = [
-        "| Name | Languages | Source | Active | Registered |",
-        "|------|-----------|--------|--------|------------|",
-        ...entries.map((e) =>
-          `| ${e.name} | ${e.languages.join(", ")} | ${e.sourceDir} | ${e.active ? "yes" : "no"} | ${e.registeredAt.slice(0, 10)} |`,
-        ),
+        "| Name | Type | Languages | Source | Active | Registered |",
+        "|------|------|-----------|--------|--------|------------|",
+        ...entries.map((e) => {
+          const type = e.sourceType === "gitlab"
+            ? `gitlab:${e.gitlabConfig?.branch ?? "?"}`
+            : "local [deprecated]";
+          const source = e.sourceType === "gitlab"
+            ? (e.gitlabConfig?.projectUrl ?? e.sourceDir)
+            : e.sourceDir;
+          return `| ${e.name} | ${type} | ${e.languages.join(", ")} | ${source} | ${e.active ? "yes" : "no"} | ${e.registeredAt.slice(0, 10)} |`;
+        }),
       ];
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     },

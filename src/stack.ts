@@ -46,6 +46,7 @@ export async function createStack(dataDir?: string): Promise<StackComponents> {
   const registry = new WorkspaceRegistry(
     paths.workspacesPath,
     paths.mdDbPath,
+    config.dataDir,
   );
   registry.load();
 

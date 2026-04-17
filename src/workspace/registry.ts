@@ -19,28 +19,49 @@ import {
   getLanguage,
   type WorkspaceLanguage as RegisteredLanguage,
 } from "../mirror/language-registry.js";
+import {
+  cloneRepo,
+  pullRepo,
+  resolveToken,
+  type GitLabConfig,
+} from "./gitlab-manager.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type WorkspaceLanguage = RegisteredLanguage;
+export type WorkspaceSourceType = "local" | "gitlab";
+export type { GitLabConfig };
 
 export interface WorkspaceEntry {
   /** Stable UUID. */
   id: string;
   /** Human slug — used as folder name in md_db. Alphanumeric + hyphens only. */
   name: string;
-  /** Absolute path to the source directory. */
+  /**
+   * Absolute path to the source directory.
+   * For "gitlab" workspaces this is the managed clone dir ({dataDir}/.context-garden/clones/{name}).
+   * For "local" workspaces this is the user-supplied directory.
+   */
   sourceDir: string;
   /** Which mirror scripts to run. */
   languages: WorkspaceLanguage[];
-  /** Whether watchers should run for this workspace. */
+  /** Whether this workspace is active. */
   active: boolean;
   /** ISO timestamp of registration. */
   registeredAt: string;
   /** Per-language omit patterns. Falls back to script defaults when absent. */
   omitPatterns?: Partial<Record<WorkspaceLanguage, string[]>>;
+  /**
+   * Source type. Defaults to "local" for back-compat with existing entries
+   * that predate this field.
+   *
+   * @deprecated "local" — prefer "gitlab" for new workspaces.
+   */
+  sourceType?: WorkspaceSourceType;
+  /** Present when sourceType === "gitlab". */
+  gitlabConfig?: GitLabConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +113,8 @@ export class WorkspaceRegistry {
     private readonly registryPath: string,
     /** Path to `md_db/`. */
     private readonly mdDbPath: string,
+    /** Root data directory — used to compute clone paths for GitLab workspaces. */
+    private readonly dataDir: string,
   ) {}
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -231,6 +254,10 @@ export class WorkspaceRegistry {
     if (!entry.active) return;
     if (this.watchers.has(entry.id)) return;
 
+    // GitLab workspaces are updated via the post-receive hook (cg-sync), not
+    // a filesystem watcher. The clone dir is read-only from CG's perspective.
+    if (entry.sourceType === "gitlab") return;
+
     const config: WorkspaceMirrorConfig = {
       sourceDir: entry.sourceDir,
       mirrorDir: this.mirrorDir(entry),
@@ -260,7 +287,10 @@ export class WorkspaceRegistry {
    */
   async mirrorAllWorkspaces(): Promise<void> {
     this.ensureLoaded();
-    const active = this.entries.filter((e) => e.active);
+    // Only mirror local workspaces on startup. GitLab workspaces are synced
+    // exclusively via the post-receive hook (cg-sync) — pulling on every
+    // MCP server restart would be unexpected and slow.
+    const active = this.entries.filter((e) => e.active && e.sourceType !== "gitlab");
     await Promise.all(
       active.map(async (entry) => {
         try {
@@ -299,20 +329,32 @@ export class WorkspaceRegistry {
   // ── Full lifecycle (register / unregister with mirror pipeline) ──────
 
   /**
-   * Register a new workspace, run initial mirror, and start watcher.
-   * Returns the created entry, count of generated notes, and their relative paths.
+   * Register a new workspace, run initial mirror, and start watcher (local) or
+   * clone + mirror (gitlab). Returns the created entry, note count, and paths.
    */
   async register(
     input: Omit<WorkspaceEntry, "id" | "registeredAt">,
   ): Promise<{ entry: WorkspaceEntry; notesGenerated: number; notePaths: string[] }> {
+    if (input.sourceType === "gitlab") {
+      return this._registerGitLab(input);
+    }
+    return this._registerLocal(input);
+  }
+
+  private async _registerLocal(
+    input: Omit<WorkspaceEntry, "id" | "registeredAt">,
+  ): Promise<{ entry: WorkspaceEntry; notesGenerated: number; notePaths: string[] }> {
+    if (input.sourceType === "local" || !input.sourceType) {
+      process.stderr.write(
+        `[registry] DEPRECATED: local workspace "${input.name}" registered. ` +
+        `Prefer GitLab-backed workspaces (source_type: "gitlab").\n`,
+      );
+    }
+
     const entry = this.add(input);
     const mirrorDir = this.mirrorDir(entry);
     mkdirSync(mirrorDir, { recursive: true });
 
-    let notesGenerated = 0;
-    const notePaths: string[] = [];
-
-    // Run initial mirror + cleanup
     const result = await runWorkspaceMirror({
       scanDir: entry.sourceDir,
       mirrorDir,
@@ -322,17 +364,87 @@ export class WorkspaceRegistry {
       wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
       omitPatterns: entry.omitPatterns,
     });
-    notesGenerated = Object.values(result.written).reduce((sum, count) => sum + count, 0);
+    const notesGenerated = Object.values(result.written).reduce((sum, n) => sum + n, 0);
 
-    // Collect paths of newly written notes for incremental index update
-    if (notesGenerated > 0) {
-      collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
+    const notePaths: string[] = [];
+    if (notesGenerated > 0) collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
+
+    this.startWatcher(entry);
+    return { entry, notesGenerated, notePaths };
+  }
+
+  private async _registerGitLab(
+    input: Omit<WorkspaceEntry, "id" | "registeredAt">,
+  ): Promise<{ entry: WorkspaceEntry; notesGenerated: number; notePaths: string[] }> {
+    if (!input.gitlabConfig) {
+      throw new Error(`gitlabConfig is required when sourceType is "gitlab"`);
     }
 
-    // Start watcher for continuous updates
-    this.startWatcher(entry);
+    // Resolve clone dir and bake it into gitlabConfig before persisting.
+    const cloneDir = join(this.dataDir, ".context-garden", "clones", input.name);
+    const gitlabConfig: GitLabConfig = { ...input.gitlabConfig, cloneDir };
 
+    const token = resolveToken(gitlabConfig);
+    process.stderr.write(`[registry] Cloning ${gitlabConfig.projectUrl} → ${cloneDir}\n`);
+    await cloneRepo(gitlabConfig, token);
+
+    // sourceDir points at the clone so the rest of the pipeline is unchanged.
+    const entry = this.add({ ...input, sourceDir: cloneDir, gitlabConfig });
+    const mirrorDir = this.mirrorDir(entry);
+    mkdirSync(mirrorDir, { recursive: true });
+
+    const result = await runWorkspaceMirror({
+      scanDir: cloneDir,
+      mirrorDir,
+      languages: entry.languages,
+      force: false,
+      workspace: entry.name,
+      wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
+      omitPatterns: entry.omitPatterns,
+    });
+    const notesGenerated = Object.values(result.written).reduce((sum, n) => sum + n, 0);
+
+    const notePaths: string[] = [];
+    if (notesGenerated > 0) collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
+
+    // No watcher — updates come via cg-sync triggered by the post-receive hook.
     return { entry, notesGenerated, notePaths };
+  }
+
+  /**
+   * Pull the latest commits from GitLab, re-mirror, and return updated note paths.
+   * Called by the cg-sync CLI (invoked via SSH from the GitLab post-receive hook).
+   * The caller is responsible for triggering engine.reindexWorkspace() afterwards.
+   */
+  async sync(name: string): Promise<{ notePaths: string[] }> {
+    this.ensureLoaded();
+    const entry = this.getByName(name);
+    if (!entry) throw new Error(`Workspace "${name}" not found`);
+    if (entry.sourceType !== "gitlab") {
+      throw new Error(`Workspace "${name}" is not a GitLab workspace (sourceType: ${entry.sourceType ?? "local"})`);
+    }
+    if (!entry.gitlabConfig) {
+      throw new Error(`Workspace "${name}" is missing gitlabConfig`);
+    }
+
+    const token = resolveToken(entry.gitlabConfig);
+    process.stderr.write(`[registry] Pulling ${entry.gitlabConfig.projectUrl} (${entry.gitlabConfig.branch})\n`);
+    await pullRepo(entry.gitlabConfig, token);
+
+    const mirrorDir = this.mirrorDir(entry);
+    await runWorkspaceMirror({
+      scanDir: entry.sourceDir,
+      mirrorDir,
+      languages: entry.languages,
+      force: false,
+      workspace: entry.name,
+      wikilinkPrefix: WorkspaceRegistry.wikilinkPrefix(entry),
+      omitPatterns: entry.omitPatterns,
+    });
+
+    const notePaths: string[] = [];
+    collectMdPaths(mirrorDir, this.mdDbPath, notePaths);
+    return { notePaths };
   }
 
   /**
@@ -346,8 +458,8 @@ export class WorkspaceRegistry {
   }
 
   /**
-   * Unregister a workspace: stop watcher, delete mirrored notes, remove from registry.
-   * Returns list of deleted note paths (relative to md_db) for incremental update.
+   * Unregister a workspace: stop watcher, delete mirrored notes and clone (for
+   * gitlab workspaces), remove from registry.
    */
   async unregister(
     name: string,
@@ -355,10 +467,8 @@ export class WorkspaceRegistry {
     const entry = this.getByName(name);
     if (!entry) return { removed: undefined, deletedPaths: [] };
 
-    // Stop watcher
     await this.stopWatcher(entry.id);
 
-    // Collect paths of notes to delete
     const deletedPaths: string[] = [];
     const mirrorDir = this.mirrorDir(entry);
 
@@ -367,7 +477,14 @@ export class WorkspaceRegistry {
       rmSync(mirrorDir, { recursive: true, force: true });
     }
 
-    // Remove from registry
+    // Delete the managed clone dir for GitLab workspaces.
+    if (entry.sourceType === "gitlab" && entry.gitlabConfig?.cloneDir) {
+      if (existsSync(entry.gitlabConfig.cloneDir)) {
+        rmSync(entry.gitlabConfig.cloneDir, { recursive: true, force: true });
+        process.stderr.write(`[registry] Deleted clone: ${entry.gitlabConfig.cloneDir}\n`);
+      }
+    }
+
     const removed = this.remove(entry.id);
     return { removed, deletedPaths };
   }
