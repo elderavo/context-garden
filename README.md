@@ -4,6 +4,21 @@ A standalone MCP (Model Context Protocol) server that turns any directory of sou
 
 Ships empty — workspaces are registered at runtime via MCP tools.
 
+
+## Future Goals
+repo understanding → law discovery → human ratification → continuous enforcement → repair loop
+
+Push all changes to a local LLM that audits changes against project design precepts and proposes fixes to keep the codebase in line. 
+
+Initial mode - read codebase via graph traversal and propose the existing design precepts and problem areas for human ratification
+Maintain mode - after initial pass, future diffs get queued up for review. Eventually agent should just ship PRs for change requests, and analyze past PRs for time-ordered trouble areas. 
+
+architecture_report.md
+design_rules.md
+violations.md
+drift_history.md
+
+
 ---
 
 ## How it works
