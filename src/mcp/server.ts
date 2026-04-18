@@ -49,6 +49,100 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
   const server = new McpServer({ name: "context-garden", version: "1.0.0" });
 
   const DEFAULT_MAX_CHARS = 15000;
+  const WEBAPP_HOST = process.env["CG_DAEMON_HOST"] ?? "127.0.0.1";
+  const WEBAPP_PORT = parseInt(process.env["CG_WEBAPP_PORT"] ?? "7433", 10);
+  const WEBAPP_BASE_URL = `http://${WEBAPP_HOST}:${WEBAPP_PORT}`;
+
+  type ApiWorkspaceEntry = {
+    id: string;
+    name: string;
+    sourceType?: "local" | "gitlab";
+    sourceDir: string;
+    languages: WorkspaceLanguage[];
+    active: boolean;
+    registeredAt: string;
+    gitlabConfig?: {
+      projectUrl: string;
+      branch: string;
+      cloneDir: string;
+      webhookSecret: string;
+    };
+  };
+
+  type ApiWorkspaceSummary = {
+    id: string;
+    name: string;
+    sourceType: "local" | "gitlab";
+    sourceDir?: string;
+    languages?: string[];
+    active: boolean;
+    registeredAt: string;
+    source: string;
+    branch?: string;
+    lastSync?: { status: string; completedAt?: string | null } | null;
+  };
+
+  async function httpJson<T>(path: string, init?: RequestInit): Promise<T> {
+    let response: Response;
+    try {
+      response = await fetch(`${WEBAPP_BASE_URL}${path}`, {
+        headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+        ...init,
+      });
+    } catch (err) {
+      throw new Error(`Failed to reach Python workspace API at ${WEBAPP_BASE_URL}: ${err}`);
+    }
+
+    const body = await response.text();
+    let parsed: any = {};
+    if (body) {
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        throw new Error(`Invalid JSON from Python workspace API: ${body.slice(0, 200)}`);
+      }
+    }
+
+    if (!response.ok) {
+      const message = parsed?.error ?? `${response.status} ${response.statusText}`;
+      throw new Error(String(message));
+    }
+    return parsed as T;
+  }
+
+  async function listWorkspacesApi(): Promise<ApiWorkspaceSummary[]> {
+    return await httpJson<ApiWorkspaceSummary[]>("/api/workspaces");
+  }
+
+  async function registerWorkspaceApi(input: {
+    name: string;
+    gitlab_url?: string;
+    gitlab_branch?: string;
+    gitlab_token?: string;
+    source_dir?: string;
+    languages: WorkspaceLanguage[];
+  }): Promise<{ entry: ApiWorkspaceEntry; notesGenerated: number; notePaths: string[]; indexing?: string }> {
+    return await httpJson<{ entry: ApiWorkspaceEntry; notesGenerated: number; notePaths: string[]; indexing?: string }>(
+      "/api/workspaces",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+  }
+
+  async function unregisterWorkspaceApi(workspaceId: string): Promise<{ deletedPaths: string[] }> {
+    return await httpJson<{ deletedPaths: string[] }>(`/api/workspaces/${workspaceId}/unregister`, {
+      method: "POST",
+    });
+  }
+
+  async function resyncTsWorkspaceWatchers(): Promise<void> {
+    if (!workspaceRegistry) return;
+    await workspaceRegistry.stopAllWatchers();
+    workspaceRegistry.load();
+    workspaceRegistry.startAllWatchers();
+  }
 
   // ── retrieve_context ──────────────────────────────────────────────────────
 
@@ -140,6 +234,26 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
     },
     async ({ retrieval_id, query, score, missing, helpful }) => {
       onContextRated?.({ retrievalId: retrieval_id, query, score, missing, helpful });
+      try {
+        await httpJson<{ status: string }>("/api/rate", {
+          method: "POST",
+          body: JSON.stringify({
+            retrieval_id,
+            query,
+            score,
+            missing,
+            helpful,
+          }),
+        });
+      } catch (err) {
+        onBackgroundError?.("rate_context", err);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Rating captured locally (${score}/5), but failed to send to Python API: ${err}`,
+          }],
+        };
+      }
       return {
         content: [{
           type: "text" as const,
@@ -191,10 +305,6 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
       },
     },
     async ({ name, gitlab_url, gitlab_branch, gitlab_token, source_dir, languages }) => {
-      if (!workspaceRegistry) {
-        return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
-      }
-
       const uniqueLanguages = [...new Set(languages)] as WorkspaceLanguage[];
       if (uniqueLanguages.length === 0) {
         return { content: [{ type: "text" as const, text: "At least one language must be specified." }] };
@@ -205,41 +315,15 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
       }
 
       try {
-        let registrationInput: Parameters<typeof workspaceRegistry.register>[0];
-
-        if (gitlab_url) {
-          registrationInput = {
-            name,
-            sourceDir: "",  // overwritten by _registerGitLab once clone dir is known
-            languages: uniqueLanguages,
-            active: true,
-            sourceType: "gitlab",
-            gitlabConfig: {
-              projectUrl: gitlab_url,
-              branch: gitlab_branch ?? "main",
-              accessToken: gitlab_token,
-              cloneDir: "",       // overwritten by _registerGitLab
-              webhookSecret: "",  // generated by _registerGitLab
-            },
-          };
-        } else {
-          registrationInput = {
-            name,
-            sourceDir: source_dir!,
-            languages: uniqueLanguages,
-            active: true,
-            sourceType: "local",
-          };
-        }
-
-        const { entry, notesGenerated } = await workspaceRegistry.register(registrationInput);
-
-        // Sync workspaces.json → daemon, then reindex just this workspace.
-        engine.syncDaemonWorkspaces()
-          .then(() => engine.reindexWorkspace(entry.name))
-          .catch((err) => {
-            onBackgroundError?.("daemon workspace sync after register_workspace", err);
-          });
+        const { entry, notesGenerated } = await registerWorkspaceApi({
+          name,
+          gitlab_url,
+          gitlab_branch,
+          gitlab_token,
+          source_dir,
+          languages: uniqueLanguages,
+        });
+        await resyncTsWorkspaceWatchers();
 
         if (entry.sourceType === "gitlab") {
           const projectUrl = entry.gitlabConfig!.projectUrl;
@@ -286,27 +370,27 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
       inputSchema: {},
     },
     async () => {
-      if (!workspaceRegistry) {
-        return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
+      try {
+        const entries = await listWorkspacesApi();
+        if (entries.length === 0) {
+          return { content: [{ type: "text" as const, text: "No workspaces registered." }] };
+        }
+        const lines = [
+          "| Name | Type | Languages | Source | Active | Registered |",
+          "|------|------|-----------|--------|--------|------------|",
+          ...entries.map((e) => {
+            const type = e.sourceType === "gitlab"
+              ? `gitlab:${e.branch ?? "?"}`
+              : "local [deprecated]";
+            const source = e.source;
+            const langs = (e.languages ?? []).join(", ");
+            return `| ${e.name} | ${type} | ${langs} | ${source} | ${e.active ? "yes" : "no"} | ${e.registeredAt.slice(0, 10)} |`;
+          }),
+        ];
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed to list workspaces: ${err}` }] };
       }
-      const entries = workspaceRegistry.list();
-      if (entries.length === 0) {
-        return { content: [{ type: "text" as const, text: "No workspaces registered." }] };
-      }
-      const lines = [
-        "| Name | Type | Languages | Source | Active | Registered |",
-        "|------|------|-----------|--------|--------|------------|",
-        ...entries.map((e) => {
-          const type = e.sourceType === "gitlab"
-            ? `gitlab:${e.gitlabConfig?.branch ?? "?"}`
-            : "local [deprecated]";
-          const source = e.sourceType === "gitlab"
-            ? (e.gitlabConfig?.projectUrl ?? e.sourceDir)
-            : e.sourceDir;
-          return `| ${e.name} | ${type} | ${e.languages.join(", ")} | ${source} | ${e.active ? "yes" : "no"} | ${e.registeredAt.slice(0, 10)} |`;
-        }),
-      ];
-      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     },
   );
 
@@ -320,17 +404,15 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
       },
     },
     async ({ name }) => {
-      if (!workspaceRegistry) {
-        return { content: [{ type: "text" as const, text: "Workspace registry not available." }] };
-      }
       try {
-        const { removed, deletedPaths } = await workspaceRegistry.unregister(name);
-        if (!removed) {
+        const entries = await listWorkspacesApi();
+        const target = entries.find((entry) => entry.name === name);
+        if (!target) {
           return { content: [{ type: "text" as const, text: `Workspace "${name}" not found.` }] };
         }
 
-        // Sync daemon with updated workspaces.json (workspace already removed by registry.unregister).
-        await engine.syncDaemonWorkspaces();
+        const { deletedPaths } = await unregisterWorkspaceApi(target.id);
+        await resyncTsWorkspaceWatchers();
 
         return {
           content: [{
@@ -501,24 +583,17 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
       // ── 3. Register workspace if requested ───────────────────────────────
       let workspaceResult = "";
       if (workspace_name && workspace_source_dir) {
-        if (!workspaceRegistry) {
-          workspaceResult = "⚠ Workspace registry not available.";
-        } else {
-          const langs = (workspace_languages ?? defaultLanguageList) as WorkspaceLanguage[];
-          try {
-            const { entry, notesGenerated } = await workspaceRegistry.register({
-              name: workspace_name,
-              sourceDir: workspace_source_dir,
-              languages: langs,
-              active: true,
-            });
-            engine.reindex().catch((err) => {
-              onBackgroundError?.("reindex after setup workspace", err);
-            });
-            workspaceResult = `✓ Workspace "${entry.name}" registered — ${notesGenerated} notes generated, indexing in background.`;
-          } catch (err) {
-            workspaceResult = `⚠ Workspace registration failed: ${err}`;
-          }
+        const langs = (workspace_languages ?? defaultLanguageList) as WorkspaceLanguage[];
+        try {
+          const { entry, notesGenerated } = await registerWorkspaceApi({
+            name: workspace_name,
+            source_dir: workspace_source_dir,
+            languages: langs,
+          });
+          await resyncTsWorkspaceWatchers();
+          workspaceResult = `✓ Workspace "${entry.name}" registered — ${notesGenerated} notes generated, indexing in background.`;
+        } catch (err) {
+          workspaceResult = `⚠ Workspace registration failed: ${err}`;
         }
       } else if (workspace_name || workspace_source_dir) {
         workspaceResult = "⚠ Both workspace_name and workspace_source_dir are required to register a workspace.";
@@ -556,13 +631,18 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
       lines.push("");
 
       lines.push("### Workspaces");
-      const workspaces = workspaceRegistry?.list() ?? [];
+      let workspaces: ApiWorkspaceSummary[] = [];
+      try {
+        workspaces = await listWorkspacesApi();
+      } catch (err) {
+        lines.push(`⚠ Failed to read workspace status from Python API: ${err}`, "");
+      }
       if (workspaceResult) lines.push(workspaceResult, "");
       if (workspaces.length === 0) {
         lines.push("_(none registered)_");
       } else {
         for (const ws of workspaces) {
-          lines.push(`- ✓ **${ws.name}** — ${ws.sourceDir}  [${ws.languages.join(", ")}]`);
+          lines.push(`- ✓ **${ws.name}** — ${ws.source}  [${(ws.languages ?? []).join(", ")}]`);
         }
       }
       lines.push("");

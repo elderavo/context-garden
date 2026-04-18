@@ -56,7 +56,7 @@ from typing import Any, Optional
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
-DAEMON_HOST = "127.0.0.1"
+DAEMON_HOST = os.environ.get("CG_DAEMON_HOST", "127.0.0.1")
 DAEMON_PORT = 7432
 MAX_PENDING_JOBS = 50
 DEBOUNCE_SECS = 0.5

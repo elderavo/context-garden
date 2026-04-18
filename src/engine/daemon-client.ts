@@ -3,6 +3,7 @@
  *
  * On connect():
  *   1. On first connect in this process, start `python -m graph.daemon --data-dir <dir>`.
+ *      Skipped when CG_DAEMON_HOST is set — connects to remote daemon instead.
  *   2. Daemon startup is restart-safe: existing daemon is shutdown/rotated by Python.
  *   3. Maintain one persistent TCP connection.
  *   4. On disconnect, retry with exponential backoff (max 30s).
@@ -14,7 +15,8 @@ import { randomUUID } from "crypto";
 import { execSync, spawn } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 
-const DAEMON_PORT = 7432;
+const DAEMON_PORT = parseInt(process.env["CG_DAEMON_PORT"] ?? "7432", 10);
+const DAEMON_HOST = process.env["CG_DAEMON_HOST"] ?? "127.0.0.1";
 const CONNECT_TIMEOUT_MS = 5_000;
 const SPAWN_WAIT_MS = 10_000;
 const SPAWN_PROBE_INTERVAL_MS = 500;
@@ -50,9 +52,12 @@ export class DaemonClient {
   async connect(): Promise<void> {
     if (this.connected) return;
 
-    const reachable = await this._probe();
-    if (!reachable) {
-      await this._spawnDaemon();
+    const remote = !!process.env["CG_DAEMON_HOST"];
+    if (!remote) {
+      const reachable = await this._probe();
+      if (!reachable) {
+        await this._spawnDaemon();
+      }
     }
 
     await this._openSocket();
@@ -117,7 +122,7 @@ export class DaemonClient {
 
   private _tryConnect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const sock = createConnection({ port: DAEMON_PORT, host: "127.0.0.1" });
+      const sock = createConnection({ port: DAEMON_PORT, host: DAEMON_HOST });
       const timer = setTimeout(() => {
         sock.destroy();
         reject(new Error("Connection timeout"));
@@ -180,7 +185,7 @@ export class DaemonClient {
   }
 
   private async _openSocket(): Promise<void> {
-    const sock = createConnection({ port: DAEMON_PORT, host: "127.0.0.1" });
+    const sock = createConnection({ port: DAEMON_PORT, host: DAEMON_HOST });
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {

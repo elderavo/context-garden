@@ -33,6 +33,8 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TOP_K = 5;
+const WEBAPP_HOST = process.env["CG_WEBAPP_HOST"] ?? process.env["CG_DAEMON_HOST"] ?? "127.0.0.1";
+const WEBAPP_PORT = parseInt(process.env["CG_WEBAPP_PORT"] ?? "7433", 10);
 
 // Returned verbatim when RAG produces zero results.
 const NOTHING_FOUND_CONTEXT =
@@ -47,6 +49,7 @@ const NOTHING_FOUND_CONTEXT =
 export class ContextEngine extends EventEmitter {
   private client: DaemonClient | null = null;
   private initialized = false;
+  private readonly webappBaseUrl = `http://${WEBAPP_HOST}:${WEBAPP_PORT}`;
 
   private readonly config: Required<Omit<ContextEngineConfig, "review" | "onDebug">> & {
     review?: ContextEngineConfig["review"];
@@ -131,11 +134,11 @@ export class ContextEngine extends EventEmitter {
     this.debug({ type: "ce_retrieval_start", timestamp: t0, query: vectorQuery.slice(0, 200), intent: prompt.slice(0, 200), topK: this.config.topK });
 
     const tVector = Date.now();
-    const rpcResult = await this.client!.rpc("query.retrieve", {
+    const rpcResult = await this._queryRetrieve({
       query: vectorQuery,
       top_k: this.config.topK,
       ...(workspace ? { workspace } : {}),
-    }) as { seed_notes: RpcRetrievedNote[]; expanded_notes: RpcRetrievedNote[] };
+    });
 
     const seedNotes = rpcResult.seed_notes.map(rpcNoteToRetrievedNote);
     const expandedNotes = rpcResult.expanded_notes.map(rpcNoteToRetrievedNote);
@@ -152,7 +155,7 @@ export class ContextEngine extends EventEmitter {
 
       const pathResults = await Promise.allSettled(
         seedPairs.map(([a, b]) =>
-          this.client!.rpc("query.find_path", {
+          this._queryFindPath({
             start: a.noteId,
             end: b.noteId,
           }) as Promise<{
@@ -298,7 +301,7 @@ export class ContextEngine extends EventEmitter {
     this._ensureInitialized();
     const t0 = Date.now();
 
-    const rpcResult = await this.client!.rpc("query.find_path", {
+    const rpcResult = await this._queryFindPath({
       start,
       end,
       ...(options?.edgeTypes ? { edge_types: options.edgeTypes } : {}),
@@ -359,7 +362,7 @@ export class ContextEngine extends EventEmitter {
   async getNoteContentAsync(relativePath: string): Promise<string | null> {
     if (!this.initialized) return null;
     try {
-      const result = await this.client!.rpc("query.get_note_content", {
+      const result = await this._queryGetNoteContent({
         relative_path: relativePath,
       }) as { body: string | null };
       return result.body;
@@ -378,7 +381,7 @@ export class ContextEngine extends EventEmitter {
    */
   async getGraphStats(): Promise<{ noteCount: number; edgeCount: number; indexLoaded: boolean }> {
     if (!this.initialized) return { noteCount: 0, edgeCount: 0, indexLoaded: false };
-    const result = await this.client!.rpc("query.stats", {
+    const result = await this._queryStats({
     }) as { doc_count: number; edge_count: number; index_loaded: boolean };
     return {
       noteCount: result.doc_count,
@@ -458,6 +461,130 @@ export class ContextEngine extends EventEmitter {
   // =========================================================================
   // Helpers
   // =========================================================================
+
+  private async _httpJson<T>(path: string, init?: RequestInit): Promise<T> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.webappBaseUrl}${path}`, {
+        ...init,
+        headers: {
+          ...(init?.body ? { "Content-Type": "application/json" } : {}),
+          ...(init?.headers ?? {}),
+        },
+      });
+    } catch (err) {
+      throw new Error(`Failed to reach HTTP query API at ${this.webappBaseUrl}: ${err}`);
+    }
+
+    const body = await response.text();
+    let parsed: any = {};
+    if (body) {
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        throw new Error(`Invalid JSON from HTTP query API (${path}): ${body.slice(0, 200)}`);
+      }
+    }
+
+    if (!response.ok) {
+      const message = parsed?.error ?? `${response.status} ${response.statusText}`;
+      throw new Error(String(message));
+    }
+    return parsed as T;
+  }
+
+  private async _queryRetrieve(params: {
+    query: string;
+    top_k?: number;
+    workspace?: string;
+    workspace_id?: string;
+  }): Promise<{ seed_notes: RpcRetrievedNote[]; expanded_notes: RpcRetrievedNote[] }> {
+    try {
+      return await this._httpJson<{ seed_notes: RpcRetrievedNote[]; expanded_notes: RpcRetrievedNote[] }>(
+        "/api/retrieve",
+        { method: "POST", body: JSON.stringify(params) },
+      );
+    } catch {
+      return await this.client!.rpc("query.retrieve", params) as { seed_notes: RpcRetrievedNote[]; expanded_notes: RpcRetrievedNote[] };
+    }
+  }
+
+  private async _queryFindPath(params: {
+    start: string;
+    end: string;
+    max_depth?: number;
+    edge_types?: string[];
+    workspace?: string;
+    workspace_id?: string;
+  }): Promise<{
+    start_id: string;
+    end_id: string;
+    start_resolved_by: string;
+    end_resolved_by: string;
+    path_length: number;
+    path_steps: Array<{ nodeId: string; edgeLabel: string; edgeDirection: string; fromNodeId: string }>;
+    path_notes: RpcRetrievedNote[];
+    no_path: boolean;
+    duration_ms: number;
+  }> {
+    try {
+      return await this._httpJson<{
+        start_id: string;
+        end_id: string;
+        start_resolved_by: string;
+        end_resolved_by: string;
+        path_length: number;
+        path_steps: Array<{ nodeId: string; edgeLabel: string; edgeDirection: string; fromNodeId: string }>;
+        path_notes: RpcRetrievedNote[];
+        no_path: boolean;
+        duration_ms: number;
+      }>(
+        "/api/find-path",
+        { method: "POST", body: JSON.stringify(params) },
+      );
+    } catch {
+      return await this.client!.rpc("query.find_path", params) as {
+        start_id: string;
+        end_id: string;
+        start_resolved_by: string;
+        end_resolved_by: string;
+        path_length: number;
+        path_steps: Array<{ nodeId: string; edgeLabel: string; edgeDirection: string; fromNodeId: string }>;
+        path_notes: RpcRetrievedNote[];
+        no_path: boolean;
+        duration_ms: number;
+      };
+    }
+  }
+
+  private async _queryStats(params: {
+    workspace?: string;
+    workspace_id?: string;
+  }): Promise<{ doc_count: number; node_count: number; edge_count: number; index_loaded: boolean }> {
+    const qs = new URLSearchParams();
+    if (params.workspace) qs.set("workspace", params.workspace);
+    if (params.workspace_id) qs.set("workspace_id", params.workspace_id);
+    const path = qs.toString() ? `/api/stats?${qs.toString()}` : "/api/stats";
+
+    try {
+      return await this._httpJson<{ doc_count: number; node_count: number; edge_count: number; index_loaded: boolean }>(path);
+    } catch {
+      return await this.client!.rpc("query.stats", params) as { doc_count: number; node_count: number; edge_count: number; index_loaded: boolean };
+    }
+  }
+
+  private async _queryGetNoteContent(params: {
+    relative_path: string;
+    workspace_id?: string;
+  }): Promise<{ body: string | null }> {
+    const qs = new URLSearchParams({ relative_path: params.relative_path });
+    if (params.workspace_id) qs.set("workspace_id", params.workspace_id);
+    try {
+      return await this._httpJson<{ body: string | null }>(`/api/note?${qs.toString()}`);
+    } catch {
+      return await this.client!.rpc("query.get_note_content", params) as { body: string | null };
+    }
+  }
 
   private _ensureInitialized(): void {
     if (!this.initialized) {
