@@ -246,16 +246,8 @@ async def _handle_activity(_req: web.Request) -> web.Response:
 
 async def _handle_daemon_restart(_req: web.Request) -> web.Response:
     import asyncio
-    import sys
-
-    flags = 0
-    if os.name == "nt":
-        import subprocess as _sp
-        flags = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS  # type: ignore[attr-defined]
-
-    import subprocess as _sp
-    _sp.Popen([sys.executable] + sys.argv, close_fds=True, creationflags=flags)
-
+    # Just exit — the TS daemon-client detects the TCP drop and respawns.
+    # Spawning our own subprocess here races with that and causes double-starts.
     asyncio.get_event_loop().call_later(0.25, lambda: os._exit(0))
     return web.json_response({"status": "restarting"})
 
