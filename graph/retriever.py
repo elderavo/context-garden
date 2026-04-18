@@ -199,7 +199,12 @@ def _batch_score_triples(
 ) -> list[float]:
     """Batch-embed triple strings and return per-triple cosine similarities."""
     try:
-        triple_embeddings = embed_model.get_text_embeddings(triple_strings)
+        # LlamaIndex embeddings use get_text_embedding_batch; our EmbedProvider
+        # protocol uses get_text_embeddings — try both.
+        if hasattr(embed_model, "get_text_embeddings"):
+            triple_embeddings = embed_model.get_text_embeddings(triple_strings)
+        else:
+            triple_embeddings = embed_model.get_text_embedding_batch(triple_strings)
         return [_cosine_sim(query_embedding, te) for te in triple_embeddings]
     except Exception as exc:
         log.warning("Triple embedding failed, using neutral scores: %s", exc)

@@ -944,10 +944,16 @@ class _DaemonServer:
                             seen[nid] = n
                     return sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)
 
-                return {
+                merged = {
                     "seed_notes": _dedup_by_score(all_seeds),
                     "expanded_notes": _dedup_by_score(all_expanded),
                 }
+                try:
+                    from . import http_server as _hs
+                    _hs.record_retrieval(query, merged)
+                except Exception:
+                    pass
+                return merged
 
         rt = self._get_runtime(params, wait_secs=RUNTIME_READY_TIMEOUT_SECS)
         if not rt:
@@ -958,6 +964,11 @@ class _DaemonServer:
                 top_k=top_k,
                 workspace=workspace_filter,
             )
+        try:
+            from . import http_server as _hs
+            _hs.record_retrieval(query, result)
+        except Exception:
+            pass
         return result
 
     def handle_query_find_path(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1417,12 +1428,23 @@ async def _run_server() -> None:
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
     log.info("ContextGarden daemon listening on %s", addrs)
 
+    # Start HTTP control plane
+    from aiohttp import web as _web
+    from .http_server import make_http_app, HTTP_PORT
+    http_app = make_http_app(_daemon, DATA_DIR)
+    http_runner = _web.AppRunner(http_app)
+    await http_runner.setup()
+    http_site = _web.TCPSite(http_runner, "0.0.0.0", HTTP_PORT)
+    await http_site.start()
+    log.info("HTTP control plane on http://0.0.0.0:%d", HTTP_PORT)
+
     asyncio.ensure_future(_periodic_metrics())
     asyncio.create_task(_boot_workspaces_in_background())
 
     async with server:
         await _shutdown_event.wait()
 
+    await http_runner.cleanup()
     log.info("Daemon shutting down")
 
 
@@ -1448,6 +1470,12 @@ def main(data_dir: Optional[str] = None) -> None:
         return
 
     _daemon.load_registry()
+
+    # Initialise the job queue with paths needed for subprocess invocations
+    _node_bin = shutil.which("node") or "node"
+    _mirror_cli = str(DATA_DIR / "dist" / "src" / "mirror" / "mirror-cli.js")
+    from . import jobs as _jobs
+    _jobs.init(DATA_DIR, _node_bin, _mirror_cli, lambda: _daemon)
 
     try:
         asyncio.run(_run_server())

@@ -13,8 +13,7 @@
     "build": "tsc",
     "prepare": "tsc",
     "start": "npx tsx bin/context-garden.ts",
-    "daemon:restart": "powershell -ExecutionPolicy Bypass -File restart-daemon.ps1",
-    "webapp": "tsx webapp/server.ts"
+    "daemon:kill": "powershell -ExecutionPolicy Bypass -File kill-all.ps1"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
