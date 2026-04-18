@@ -244,14 +244,20 @@ async def _handle_activity(_req: web.Request) -> web.Response:
     return web.json_response(list(_activity_ring))
 
 
-async def _handle_daemon_start(_req: web.Request) -> web.Response:
-    assert _daemon_ref is not None
+async def _handle_daemon_restart(_req: web.Request) -> web.Response:
     import asyncio
-    try:
-        health = await asyncio.to_thread(_daemon_ref.handle_daemon_health, {})
-        return web.json_response(health)
-    except Exception as exc:
-        return web.json_response({"error": str(exc)}, status=500)
+    import sys
+
+    flags = 0
+    if os.name == "nt":
+        import subprocess as _sp
+        flags = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS  # type: ignore[attr-defined]
+
+    import subprocess as _sp
+    _sp.Popen([sys.executable] + sys.argv, close_fds=True, creationflags=flags)
+
+    asyncio.get_event_loop().call_later(0.25, lambda: os._exit(0))
+    return web.json_response({"status": "restarting"})
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -284,8 +290,7 @@ def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> web.Application:
     app.router.add_get("/api/status", _handle_status)
 
     app.router.add_post("/daemon/stop", _handle_daemon_stop)
-    app.router.add_post("/daemon/start", _handle_daemon_start)
     app.router.add_post("/api/daemon/stop", _handle_daemon_stop)
-    app.router.add_post("/api/daemon/start", _handle_daemon_start)
+    app.router.add_post("/api/daemon/restart", _handle_daemon_restart)
 
     return app

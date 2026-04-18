@@ -175,8 +175,7 @@
     button:active { transform: scale(0.97); }
     button:hover:not(:disabled) { opacity: 0.75; }
     button:disabled { opacity: 0.35; cursor: not-allowed; }
-    .btn-stop  { background: rgba(248,81,73,0.12);  color: var(--red);   border: 1px solid rgba(248,81,73,0.25); }
-    .btn-start { background: rgba(63,185,80,0.12);  color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
+    .btn-restart { background: rgba(210,153,34,0.12); color: var(--yellow); border: 1px solid rgba(210,153,34,0.25); }
     .btn-sync  {
       padding: 3px 9px;
       background: rgba(88,166,255,0.08);
@@ -482,8 +481,7 @@
         </div>
       </div>
       <div class="btn-row">
-        <button class="btn-stop"  id="btn-stop"  onclick="stopDaemon()"  disabled>Stop</button>
-        <button class="btn-start" id="btn-start" onclick="startDaemon()" disabled>Start</button>
+        <button class="btn-restart" id="btn-restart" onclick="restartDaemon()" disabled>Restart</button>
       </div>
     </div>
 
@@ -806,8 +804,7 @@
   }
 
   function setBtns(running) {
-    document.getElementById('btn-stop').disabled  = !running;
-    document.getElementById('btn-start').disabled = running;
+    document.getElementById('btn-restart').disabled = !running;
   }
 
   // ── Jobs ──────────────────────────────────────────────────────────────────
@@ -1061,22 +1058,26 @@
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
-  async function stopDaemon() {
-    const btn = document.getElementById('btn-stop');
-    btn.disabled = true; btn.textContent = 'Stopping…';
-    try { await fetch('/api/daemon/stop', {method:'POST'}); } catch {}
-    setTimeout(pollStatus, 800);
-    btn.textContent = 'Stop';
-  }
-
-  async function startDaemon() {
-    const btn = document.getElementById('btn-start');
-    btn.disabled = true; btn.textContent = 'Starting…';
-    document.getElementById('ov-dot').className   = 'dot pending';
-    document.getElementById('ov-label').textContent = 'Starting…';
-    try { await fetch('/api/daemon/start', {method:'POST'}); } catch {}
-    await pollStatus();
-    btn.textContent = 'Start';
+  async function restartDaemon() {
+    const btn = document.getElementById('btn-restart');
+    btn.disabled = true;
+    btn.textContent = 'Restarting…';
+    document.getElementById('ov-dot').className    = 'dot pending';
+    document.getElementById('ov-label').textContent = 'Restarting…';
+    setHeaderPill(false);
+    try { await fetch('/api/daemon/restart', {method:'POST'}); } catch {}
+    // Poll until it comes back (up to 30s)
+    const deadline = Date.now() + 30000;
+    const wait = () => new Promise(r => setTimeout(r, 1000));
+    while (Date.now() < deadline) {
+      await wait();
+      try {
+        const res = await fetch('/api/status');
+        const d   = await res.json();
+        if (d.status === 'ok') { await pollStatus(); break; }
+      } catch {}
+    }
+    btn.textContent = 'Restart';
   }
 
   async function syncWorkspace(id, btn) {
