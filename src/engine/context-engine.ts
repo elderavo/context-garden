@@ -46,7 +46,6 @@ const NOTHING_FOUND_CONTEXT =
 
 export class ContextEngine extends EventEmitter {
   private client: DaemonClient | null = null;
-  private daemonWorkspaceIds = new Map<string, string>(); // name → daemon UUID
   private initialized = false;
 
   private readonly config: Required<Omit<ContextEngineConfig, "review" | "onDebug">> & {
@@ -83,9 +82,8 @@ export class ContextEngine extends EventEmitter {
   // =========================================================================
 
   /**
-   * Connect to the daemon. Idempotent. Workspaces are registered separately
-   * via registerDaemonWorkspace() — called by stack.ts on startup and by the
-   * MCP register_workspace tool when new workspaces are added.
+   * Connect to the daemon. Idempotent. Call syncDaemonWorkspaces() afterwards
+   * to reconcile workspaces.json with the daemon.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -109,30 +107,12 @@ export class ContextEngine extends EventEmitter {
   }
 
   /**
-   * Register a workspace with the daemon (idempotent — daemon dedupes by root_path).
-   * root_path should be the mirror dir: md_db/code/<name>/
+   * Re-read workspaces.json and reconcile daemon state: boot new workspaces,
+   * stop removed ones. Call after any register/unregister operation.
    */
-  async registerDaemonWorkspace(name: string, rootPath: string): Promise<string> {
+  async syncDaemonWorkspaces(): Promise<void> {
     if (!this.initialized) await this.initialize();
-    const result = await this.client!.rpc("workspaces.register", {
-      name,
-      root_path: rootPath,
-    }) as { workspace_id: string; existed: boolean; doc_count?: number };
-    this.daemonWorkspaceIds.set(name, result.workspace_id);
-    return result.workspace_id;
-  }
-
-  /**
-   * Unregister a workspace from the daemon by name.
-   */
-  async unregisterDaemonWorkspace(name: string): Promise<void> {
-    if (!this.initialized) return;
-    try {
-      await this.client!.rpc("workspaces.unregister", { name });
-      this.daemonWorkspaceIds.delete(name);
-    } catch (err) {
-      process.stderr.write(`[context-engine] Failed to unregister daemon workspace "${name}": ${err}\n`);
-    }
+    await this.client!.rpc("workspaces.sync", {});
   }
 
   /**
@@ -425,9 +405,7 @@ export class ContextEngine extends EventEmitter {
    */
   async reindexWorkspace(name: string): Promise<void> {
     this._ensureInitialized();
-    const workspaceId = this.daemonWorkspaceIds.get(name);
-    if (!workspaceId) return;
-    await this.client!.rpc("index.rebuild", { workspace_id: workspaceId });
+    await this.client!.rpc("index.rebuild", { name });
   }
 
   /**
@@ -437,10 +415,8 @@ export class ContextEngine extends EventEmitter {
    */
   async incrementalUpdate(changedPaths: string[], deletedPaths: string[] = [], workspaceName?: string): Promise<void> {
     this._ensureInitialized();
-    const workspaceId = workspaceName ? this.daemonWorkspaceIds.get(workspaceName) : undefined;
-    if (workspaceName && !workspaceId) return; // workspace not known to daemon yet
     const result = await this.client!.rpc("index.enqueue", {
-      ...(workspaceId ? { workspace_id: workspaceId } : {}),
+      ...(workspaceName ? { name: workspaceName } : {}),
       changed_paths: changedPaths,
       deleted_paths: deletedPaths,
     }) as { job_id: string; queue_depth: number };
@@ -461,7 +437,6 @@ export class ContextEngine extends EventEmitter {
       this.client = null;
     }
     this.initialized = false;
-    this.daemonWorkspaceIds.clear();
   }
 
   // =========================================================================

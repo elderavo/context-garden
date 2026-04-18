@@ -5,7 +5,7 @@
  */
 
 import { join } from "path";
-import { existsSync, mkdirSync } from "fs";
+import { mkdirSync } from "fs";
 import { initConfig, resolvePaths, type ContextGardenConfig } from "./config.js";
 import { ContextEngine } from "./engine/context-engine.js";
 import { WorkspaceRegistry } from "./workspace/registry.js";
@@ -50,19 +50,8 @@ export async function createStack(dataDir?: string): Promise<StackComponents> {
   );
   registry.load();
 
-  // Sync TS workspaces → daemon (idempotent; daemon dedupes by root_path).
-  // Each TS workspace mirrors source code into md_db/code/<name>/ — that mirror
-  // dir is what the daemon indexes.
-  for (const entry of registry.list()) {
-    const mirrorDir = registry.mirrorDir(entry);
-    if (existsSync(mirrorDir)) {
-      try {
-        await engine.registerDaemonWorkspace(entry.name, mirrorDir);
-      } catch (err) {
-        process.stderr.write(`[context-garden] Failed to register daemon workspace "${entry.name}": ${err}\n`);
-      }
-    }
-  }
+  // Sync daemon with workspaces.json (idempotent — daemon reads file directly).
+  await engine.syncDaemonWorkspaces();
 
   // Catch any source changes that happened while the MCP server was down,
   // then start watchers for ongoing changes.

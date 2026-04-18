@@ -8,15 +8,16 @@ Architecture
   asyncio TCP server on 127.0.0.1:7432
   Per-workspace KnowledgeGraphEngine instances
   Per-workspace watchdog file watchers (debounced 500 ms, .md files only)
-  Workspace registry persisted to <dataDir>/.context-garden/registry.json
+  Workspace registry read from <dataDir>/.context-garden/workspaces.json (written by TS layer)
   Per-workspace index persisted to <dataDir>/.context-garden/knowledge_graph/<workspace_id>/index/
   file_hashes.json drift detection on boot — only re-embeds changed files
 
 RPC API (v1, newline-delimited JSON)
 ────────────────────────────────────
-  workspaces.register   { name, root_path, include_globs?, exclude_globs? }
+  workspaces.sync       {}  ← re-reads workspaces.json, boots new, stops removed
+  workspaces.register   { name, root_path, ... }  ← deprecated alias for workspaces.sync
   workspaces.list       {}
-  workspaces.unregister { workspace_id, delete_data? }
+  workspaces.unregister { workspace_id?, name? }  ← deprecated alias for workspaces.sync
   workspaces.status     { workspace_id }
 
   index.enqueue  { workspace_id, changed_paths, deleted_paths }
@@ -64,7 +65,8 @@ RUNTIME_READY_TIMEOUT_SECS = 90.0
 
 DATA_DIR = Path.cwd()
 STATE_DIR = DATA_DIR / ".context-garden"
-REGISTRY_PATH = STATE_DIR / "registry.json"
+WORKSPACES_JSON_PATH = STATE_DIR / "workspaces.json"
+MD_DB_PATH = DATA_DIR / "md_db"
 
 logging.basicConfig(
     stream=sys.stderr,
@@ -234,10 +236,11 @@ _logger = DaemonLogger()
 
 
 def configure_paths(data_dir: str | Path) -> None:
-    global DATA_DIR, STATE_DIR, REGISTRY_PATH
+    global DATA_DIR, STATE_DIR, WORKSPACES_JSON_PATH, MD_DB_PATH
     DATA_DIR = Path(data_dir).resolve()
     STATE_DIR = DATA_DIR / ".context-garden"
-    REGISTRY_PATH = STATE_DIR / "registry.json"
+    WORKSPACES_JSON_PATH = STATE_DIR / "workspaces.json"
+    MD_DB_PATH = DATA_DIR / "md_db"
 
 
 # ── Workspace registry ───────────────────────────────────────────────────────
@@ -260,6 +263,35 @@ class WorkspaceRecord:
     @staticmethod
     def from_dict(d: dict[str, Any]) -> WorkspaceRecord:
         return WorkspaceRecord(**d)
+
+
+def _read_workspaces_json() -> list[WorkspaceRecord]:
+    """Read workspaces.json (written by TS layer) and derive WorkspaceRecord objects.
+
+    Mirror dir convention: md_db/code/<name>
+    Workspace ID: uuid5(NAMESPACE_DNS, name) — stable across restarts without persistence.
+    """
+    if not WORKSPACES_JSON_PATH.exists():
+        return []
+    try:
+        entries = json.loads(WORKSPACES_JSON_PATH.read_text("utf-8"))
+        records: list[WorkspaceRecord] = []
+        for entry in entries:
+            if not entry.get("active", True):
+                continue
+            name = entry["name"]
+            root_path = str(MD_DB_PATH / "code" / name)
+            workspace_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
+            records.append(WorkspaceRecord(
+                workspace_id=workspace_id,
+                name=name,
+                root_path=root_path,
+                registered_at=entry.get("registeredAt", _now_iso()),
+            ))
+        return records
+    except Exception as exc:
+        log.error("Failed to read workspaces.json: %s", exc)
+        return []
 
 
 # ── Per-workspace runtime ────────────────────────────────────────────────────
@@ -555,21 +587,14 @@ class _DaemonServer:
 
     def load_registry(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if not REGISTRY_PATH.exists():
-            return
-        try:
-            data = json.loads(REGISTRY_PATH.read_text("utf-8"))
-            for entry in data:
-                rec = WorkspaceRecord.from_dict(entry)
-                self._workspaces[rec.workspace_id] = rec
-            log.info("Loaded %d workspace(s) from registry", len(self._workspaces))
-        except Exception as exc:
-            log.error("Failed to load registry: %s", exc)
-
-    def _save_registry(self) -> None:
-        data = [rec.to_dict() for rec in self._workspaces.values()]
-        REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        REGISTRY_PATH.write_text(json.dumps(data, indent=2), "utf-8")
+        legacy = STATE_DIR / "registry.json"
+        if legacy.exists():
+            legacy.unlink(missing_ok=True)
+            log.info("Removed legacy registry.json (workspaces now read from workspaces.json)")
+        records = _read_workspaces_json()
+        for rec in records:
+            self._workspaces[rec.workspace_id] = rec
+        log.info("Loaded %d workspace(s) from workspaces.json", len(self._workspaces))
 
     # ── Workspace lifecycle ──────────────────────────────────────────────
 
@@ -672,53 +697,70 @@ class _DaemonServer:
             raise RuntimeError("Failed to boot one or more workspaces: " + "; ".join(failures))
     # ── RPC handlers ────────────────────────────────────────────────────
 
-    def handle_workspaces_register(self, params: dict[str, Any]) -> dict[str, Any]:
-        name = params["name"]
-        root_path = str(Path(params["root_path"]).resolve())
-        include_globs = params.get("include_globs", ["**/*.md"])
-        exclude_globs = params.get("exclude_globs", [])
+    def handle_workspaces_sync(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Reconcile daemon state with workspaces.json: boot new workspaces, stop removed ones."""
+        records = _read_workspaces_json()
+        new_by_id = {r.workspace_id: r for r in records}
 
         with self._lock:
-            # Idempotent: return existing if root_path already registered
-            for rec in self._workspaces.values():
-                if rec.root_path == root_path:
-                    log.info("Workspace '%s' already registered (id=%s)", rec.name, rec.workspace_id)
-                    return {"workspace_id": rec.workspace_id, "existed": True}
+            current_ids = set(self._workspaces.keys())
 
-            if not os.path.isdir(root_path):
-                raise ValueError(f"root_path does not exist or is not a directory: {root_path}")
-
-            workspace_id = str(uuid.uuid4())
-            record = WorkspaceRecord(
-                workspace_id=workspace_id,
-                name=name,
-                root_path=root_path,
-                include_globs=include_globs,
-                exclude_globs=exclude_globs,
-            )
-            self._workspaces[workspace_id] = record
-            self._save_registry()
-
-        # Engine init (slow — embeddings) outside the lock
-        try:
-            log.info("Registering workspace '%s' at %s…", name, root_path)
-            runtime = self._init_engine(record)
-            with self._lock:
-                self._runtimes[workspace_id] = runtime
-                self._boot_errors.pop(workspace_id, None)
+        # Stop workspaces no longer in workspaces.json
+        removed_ids = current_ids - new_by_id.keys()
+        for wid in removed_ids:
+            self._stop_observer(wid)
+            with self._runtime_ready:
+                rt = self._runtimes.pop(wid, None)
+                self._workspaces.pop(wid, None)
+                self._boot_errors.pop(wid, None)
                 self._runtime_ready.notify_all()
-            _ensure_index_thread(runtime)
-            self._start_observer(runtime)
-            log.info("Workspace '%s' registered — %d docs", name, runtime.doc_count)
-            return {"workspace_id": workspace_id, "existed": False, "doc_count": runtime.doc_count}
-        except Exception as exc:
-            # Roll back
+            if rt:
+                _stop_index_thread(rt)
+
+        # Register any new workspaces
+        added: list[WorkspaceRecord] = []
+        for wid, rec in new_by_id.items():
             with self._lock:
-                self._workspaces.pop(workspace_id, None)
-                self._boot_errors.pop(workspace_id, None)
-                self._save_registry()
-                self._runtime_ready.notify_all()
-            raise RuntimeError(f"Engine initialization failed: {exc}") from exc
+                if wid not in self._workspaces:
+                    self._workspaces[wid] = rec
+                    added.append(rec)
+
+        # Boot new workspaces (slow — runs embeddings)
+        for rec in added:
+            if not os.path.isdir(rec.root_path):
+                log.warning("Workspace '%s' root_path does not exist: %s", rec.name, rec.root_path)
+                with self._runtime_ready:
+                    self._boot_errors[rec.workspace_id] = f"root_path does not exist: {rec.root_path}"
+                    self._runtime_ready.notify_all()
+                continue
+            try:
+                log.info("Booting workspace '%s' (%s)...", rec.name, rec.root_path)
+                runtime = self._init_engine(rec)
+                with self._runtime_ready:
+                    if rec.workspace_id not in self._workspaces:
+                        log.info("Workspace '%s' removed while booting — discarding", rec.name)
+                        continue
+                    self._runtimes[rec.workspace_id] = runtime
+                    self._boot_errors.pop(rec.workspace_id, None)
+                    self._runtime_ready.notify_all()
+                _ensure_index_thread(runtime)
+                self._start_observer(runtime)
+                log.info("Workspace '%s' ready — %d docs", rec.name, runtime.doc_count)
+            except Exception as exc:
+                log.error("Failed to boot workspace '%s': %s", rec.name, exc)
+                with self._runtime_ready:
+                    self._boot_errors[rec.workspace_id] = str(exc)
+                    self._runtime_ready.notify_all()
+
+        with self._lock:
+            return {
+                "added": [r.name for r in added],
+                "removed": list(removed_ids),
+                "total": len(self._workspaces),
+            }
+
+    def handle_workspaces_register(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.handle_workspaces_sync(params)
 
     def handle_workspaces_list(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -738,48 +780,7 @@ class _DaemonServer:
             return {"workspaces": result}
 
     def handle_workspaces_unregister(self, params: dict[str, Any]) -> dict[str, Any]:
-        workspace_id = params.get("workspace_id")
-        name = params.get("name")
-        delete_data = params.get("delete_data", False)
-
-        # Allow lookup by name when workspace_id (UUID) is not provided
-        if not workspace_id and name:
-            with self._lock:
-                for wid, rec in self._workspaces.items():
-                    if rec.name == name:
-                        workspace_id = wid
-                        break
-            if not workspace_id:
-                log.debug("workspaces.unregister: '%s' not found — already gone", name)
-                return {"ok": True, "existed": False}
-        elif not workspace_id:
-            raise ValueError("workspace_id or name is required")
-
-        with self._lock:
-            if workspace_id not in self._workspaces:
-                log.debug("workspaces.unregister: %s not found — already gone", workspace_id)
-                return {"ok": True, "existed": False}
-
-            # Stop observer
-            self._stop_observer(workspace_id)
-
-            # Stop indexer thread
-            rt = self._runtimes.pop(workspace_id, None)
-            if rt:
-                _stop_index_thread(rt)
-
-            self._workspaces.pop(workspace_id)
-            self._boot_errors.pop(workspace_id, None)
-            self._save_registry()
-            self._runtime_ready.notify_all()
-
-        if delete_data:
-            data_path = STATE_DIR / "knowledge_graph" / workspace_id
-            if data_path.exists():
-                shutil.rmtree(data_path, ignore_errors=True)
-                log.info("Deleted workspace data: %s", data_path)
-
-        return {"ok": True}
+        return self.handle_workspaces_sync(params)
 
     def handle_workspaces_status(self, params: dict[str, Any]) -> dict[str, Any]:
         workspace_id = params["workspace_id"]
@@ -799,11 +800,17 @@ class _DaemonServer:
         }
 
     def handle_index_enqueue(self, params: dict[str, Any]) -> dict[str, Any]:
-        workspace_id = params["workspace_id"]
+        workspace_id = params.get("workspace_id")
+        name = params.get("name")
         with self._lock:
-            rt = self._runtimes.get(workspace_id)
+            if workspace_id:
+                rt = self._runtimes.get(workspace_id)
+            elif name:
+                rt = next((r for r in self._runtimes.values() if r.record.name == name), None)
+            else:
+                rt = None
         if not rt:
-            raise KeyError(f"Workspace not initialized: {workspace_id}")
+            raise KeyError(f"Workspace not initialized: {workspace_id or name}")
         return _enqueue_index_job(
             rt,
             params.get("changed_paths", []),
@@ -812,14 +819,17 @@ class _DaemonServer:
 
     def handle_index_rebuild(self, params: dict[str, Any]) -> dict[str, Any]:
         workspace_id = params.get("workspace_id")
+        name = params.get("name")
         with self._lock:
             if workspace_id:
                 targets = [self._runtimes[workspace_id]] if workspace_id in self._runtimes else []
+            elif name:
+                targets = [rt for rt in self._runtimes.values() if rt.record.name == name]
             else:
                 targets = list(self._runtimes.values())
         if not targets:
             raise KeyError(
-                f"Workspace not initialized: {workspace_id}" if workspace_id
+                f"Workspace not initialized: {workspace_id or name}" if (workspace_id or name)
                 else "No initialized workspaces to rebuild"
             )
 
@@ -953,7 +963,25 @@ class _DaemonServer:
     def handle_query_find_path(self, params: dict[str, Any]) -> dict[str, Any]:
         rt = self._get_runtime(params, wait_secs=RUNTIME_READY_TIMEOUT_SECS)
         if not rt:
-            raise RuntimeError("Workspace is still initializing; try again shortly.")
+            # Multi-workspace or not-yet-ready: if runtimes exist, fan-out and
+            # return the first non-empty path; if none are ready, raise.
+            with self._lock:
+                runtimes = list(self._runtimes.values())
+            if not runtimes:
+                raise RuntimeError("No workspaces are initialized yet; try again shortly.")
+            last_result: Optional[dict[str, Any]] = None
+            for candidate in runtimes:
+                with candidate._engine_lock:
+                    result = candidate.engine.find_path(
+                        start_query=params["start"],
+                        end_query=params["end"],
+                        edge_types=params.get("edge_types"),
+                        max_depth=params.get("max_depth", 8),
+                    )
+                last_result = result
+                if not result.get("no_path", True):
+                    return result
+            return last_result  # type: ignore[return-value]
         with rt._engine_lock:
             return rt.engine.find_path(
                 start_query=params["start"],
@@ -1038,6 +1066,7 @@ class _DaemonServer:
     # ── Dispatch ─────────────────────────────────────────────────────────
 
     HANDLERS: dict[str, str] = {
+        "workspaces.sync":          "handle_workspaces_sync",
         "workspaces.register":      "handle_workspaces_register",
         "workspaces.list":          "handle_workspaces_list",
         "workspaces.unregister":    "handle_workspaces_unregister",
@@ -1056,6 +1085,7 @@ class _DaemonServer:
 
     # These methods can block (embedding, indexing, retrieval) and must run in a thread executor
     _BLOCKING_METHODS = {
+        "workspaces.sync",
         "workspaces.register",
         "index.rebuild",
         "query.retrieve",
@@ -1082,8 +1112,9 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
     peer = writer.get_extra_info("peername")
     conn_id = str(uuid.uuid4())[:8]
     call_count = 0
+    _health_only = True  # flipped to False on first non-health call
 
-    log.info("conn.open  peer=%s conn_id=%s", peer, conn_id)
+    log.debug("conn.open  peer=%s conn_id=%s", peer, conn_id)
     _logger.log_conn_open(conn_id, str(peer))
     _daemon._conn_open(conn_id, str(peer), _now_iso())
 
@@ -1112,6 +1143,9 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             method = req.get("method", "")
             params = req.get("params", {})
 
+            if method != "daemon.health":
+                _health_only = False
+
             t0 = time.monotonic()
             try:
                 if method in _daemon._BLOCKING_METHODS:
@@ -1120,7 +1154,8 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                     result = _daemon.dispatch(method, params)
 
                 dur_ms = round((time.monotonic() - t0) * 1000, 1)
-                log.info(
+                _rpc_log = log.debug if method == "daemon.health" else log.info
+                _rpc_log(
                     "rpc.ok   conn=%s method=%s duration_ms=%.1f",
                     conn_id, method, dur_ms,
                 )
@@ -1158,7 +1193,8 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 break
 
     finally:
-        log.info("conn.close peer=%s conn_id=%s calls=%d", peer, conn_id, call_count)
+        _close_log = log.debug if _health_only else log.info
+        _close_log("conn.close peer=%s conn_id=%s calls=%d", peer, conn_id, call_count)
         _logger.log_conn_close(conn_id, call_count)
         _daemon._conn_close(conn_id)
         try:

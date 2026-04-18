@@ -234,12 +234,11 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
 
         const { entry, notesGenerated } = await workspaceRegistry.register(registrationInput);
 
-        // Register the mirror dir with the daemon, then reindex just this workspace.
-        const mirrorDir = workspaceRegistry.mirrorDir(entry);
-        engine.registerDaemonWorkspace(entry.name, mirrorDir)
+        // Sync workspaces.json → daemon, then reindex just this workspace.
+        engine.syncDaemonWorkspaces()
           .then(() => engine.reindexWorkspace(entry.name))
           .catch((err) => {
-            onBackgroundError?.("daemon workspace registration after register_workspace", err);
+            onBackgroundError?.("daemon workspace sync after register_workspace", err);
           });
 
         if (entry.sourceType === "gitlab") {
@@ -330,8 +329,8 @@ export function createContextGardenMcpServer(opts: McpServerOptions): McpServer 
           return { content: [{ type: "text" as const, text: `Workspace "${name}" not found.` }] };
         }
 
-        // Unregister from daemon — removes its watchdog, index, and registry entry.
-        await engine.unregisterDaemonWorkspace(name);
+        // Sync daemon with updated workspaces.json (workspace already removed by registry.unregister).
+        await engine.syncDaemonWorkspaces();
 
         return {
           content: [{

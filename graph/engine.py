@@ -26,7 +26,7 @@ from .indexer import _scan_md_db, _build_graph_store, _build_suffix_index
 from .keyword_retriever import KeywordRetriever
 from .markdown_utils import normalize_token, IGNORED_DIRS
 from .models import ParsedNote, RetrievedNote
-from .providers import get_embed_config, check_reachable, create_embedding
+from .providers import get_embed_config, get_backend
 
 log = logging.getLogger(__name__)
 
@@ -220,20 +220,21 @@ class KnowledgeGraphEngine:
 
         self._embed_context_length: int = embed_config.get("context_length", 8192)
 
-        embed_model_obj = create_embedding(embed_config)
+        backend = get_backend(embed_config)
         Settings.llm = None
 
-        if embed_model_obj is None:
-            provider = embed_config.get("provider", "unknown")
+        if not backend.check_reachable():
             raise RuntimeError(
-                f"Embedding provider '{provider}' is not supported in strict mode; "
-                "configure a reachable provider with embeddings enabled."
+                f"Embedding provider '{embed_config.get('provider', 'unknown')}' "
+                f"unreachable at {embed_config.get('host', '')}"
             )
 
-        if not check_reachable(embed_config):
-            host = embed_config.get("host", "")
-            provider = embed_config.get("provider", "unknown")
-            raise RuntimeError(f"Embedding provider '{provider}' unreachable at {host}")
+        embed_model_obj = backend.create_llama_embedding()
+        if embed_model_obj is None:
+            raise RuntimeError(
+                f"Embedding provider '{embed_config.get('provider', 'unknown')}' is not "
+                "supported in strict mode; configure a reachable provider with embeddings enabled."
+            )
 
         self.embed_model = embed_model_obj
         Settings.embed_model = embed_model_obj
