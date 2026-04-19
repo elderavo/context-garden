@@ -1,0 +1,15 @@
+services:
+  context-garden:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "7433:7433"
+    volumes:
+      - ./data:/data
+    environment:
+      # Point at your homelab Ollama instance
+      CG_OLLAMA_HOST: "${CG_OLLAMA_HOST:-http://ollama:11434}"
+      CG_WEBAPP_PORT: "7433"
+    extra_hosts:
+      # Lets the container reach host-network services on Linux
+      - "host.docker.internal:host-gateway"
