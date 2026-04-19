@@ -5,26 +5,14 @@
   "author": "Alex",
   "license": "MIT",
   "type": "module",
-  "bin": {
-    "context-garden": "./dist/bin/context-garden.js",
-    "cg-sync": "./dist/bin/cg-sync.js"
-  },
   "scripts": {
     "build": "tsc",
-    "prepare": "tsc",
-    "start": "npx tsx bin/context-garden.ts",
-    "daemon:kill": "powershell -ExecutionPolicy Bypass -File kill-all.ps1"
+    "mirror": "node dist/src/mirror/mirror-cli.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
-    "axios": "^1.13.6",
-    "chokidar": "^3.6.0",
-    "express": "^4.21.0",
-    "typescript": "^5.0.0",
-    "zod": "^4.3.6"
+    "typescript": "^5.0.0"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/node": "^20.0.0",
     "tsx": "^4.21.0"
   }

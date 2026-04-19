@@ -13,8 +13,7 @@
     "sourceMap": true
   },
   "include": [
-    "bin/**/*.ts",
-    "src/**/*.ts"
+    "src/mirror/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }
