@@ -43,7 +43,7 @@ def create_mcp_server(
 ) -> FastMCP:
     """Build and return the FastMCP server wired to the live daemon."""
 
-    mcp = FastMCP("context-garden", version="2.0.0")
+    mcp = FastMCP("context-garden")
 
     # ── retrieve_context ──────────────────────────────────────────────────────
 
