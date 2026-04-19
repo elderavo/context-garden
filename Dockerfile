@@ -13,10 +13,10 @@ RUN pip install --no-cache-dir -r context_engine/requirements.txt
 
 # Node deps + build mirror
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev || npm install --omit=dev
+RUN npm ci || npm install
 COPY tsconfig.json ./
 COPY src/mirror ./src/mirror
-RUN npx tsc
+RUN npx tsc && npm prune --omit=dev
 
 # Application code
 COPY context_engine ./context_engine
