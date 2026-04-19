@@ -200,3 +200,94 @@ def get_synth_config() -> dict[str, Any]:
     if _cached is None:
         _cached = load_config()
     return _cached["synthesizer"]
+
+
+def get_config_snapshot() -> dict[str, Any]:
+    """Return a flat snapshot suitable for the MCP configure/setup tools."""
+    embed = get_embed_config()
+    synth = get_synth_config()
+    return {
+        "embedProvider": embed.get("provider", ""),
+        "embedModel": embed.get("model", ""),
+        "embedHost": embed.get("host", ""),
+        "embedContextLength": embed.get("context_length", 512),
+        "embedApiKey": embed.get("api_key", ""),
+        "llmProvider": synth.get("provider", ""),
+        "llmModel": synth.get("model", ""),
+        "llmHost": synth.get("host", ""),
+        "llmContextWindow": synth.get("context_window", 32768),
+        "llmMaxTokens": synth.get("max_tokens", 4096),
+        "llmApiKey": synth.get("api_key", ""),
+    }
+
+
+def write_config(patch: dict[str, Any], persist: bool = True) -> None:
+    """Apply a flat patch (same shape as get_config_snapshot) to config.json.
+
+    Keys understood: embedProvider, embedModel, embedHost, embedApiKey,
+    llmProvider, llmModel, llmHost, llmApiKey.
+    API keys are written to ~/.context-garden/.env (never config.json).
+    """
+    global _cached
+
+    config_path = _DATA_DIR / ".context-garden" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = json.loads(config_path.read_text("utf-8"))
+        except Exception:
+            pass
+
+    embed_raw = raw.setdefault("embedding", {})
+    synth_raw = raw.setdefault("synthesizer", {})
+
+    mapping_embed = {
+        "embedProvider": "provider",
+        "embedModel": "model",
+        "embedHost": "host",
+    }
+    mapping_synth = {
+        "llmProvider": "provider",
+        "llmModel": "model",
+        "llmHost": "host",
+    }
+
+    for flat_key, raw_key in mapping_embed.items():
+        if flat_key in patch and patch[flat_key]:
+            embed_raw[raw_key] = patch[flat_key]
+    for flat_key, raw_key in mapping_synth.items():
+        if flat_key in patch and patch[flat_key]:
+            synth_raw[raw_key] = patch[flat_key]
+
+    # API keys go to ~/.context-garden/.env, never config.json
+    env_file = Path.home() / ".context-garden" / ".env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_lines: list[str] = []
+    try:
+        env_lines = env_file.read_text("utf-8").splitlines()
+    except OSError:
+        pass
+
+    def _upsert_env(lines: list[str], key: str, value: str) -> list[str]:
+        prefix = f"{key}="
+        updated = [l for l in lines if not l.startswith(prefix)]
+        if value:
+            updated.append(f"{key}={value}")
+        return updated
+
+    if patch.get("embedApiKey"):
+        env_lines = _upsert_env(env_lines, "CG_EMBED_API_KEY", patch["embedApiKey"])
+        embed_raw["apiKeyRef"] = "env:CG_EMBED_API_KEY"
+    if patch.get("llmApiKey"):
+        env_lines = _upsert_env(env_lines, "CG_LLM_API_KEY", patch["llmApiKey"])
+        synth_raw["apiKeyRef"] = "env:CG_LLM_API_KEY"
+
+    if persist:
+        config_path.write_text(json.dumps(raw, indent=2), "utf-8")
+        env_file.write_text("\n".join(env_lines) + "\n", "utf-8")
+        log.info("Config written to %s", config_path)
+
+    # Bust cache so next get_*_config() re-reads
+    _cached = None

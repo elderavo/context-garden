@@ -1428,15 +1428,14 @@ async def _run_server() -> None:
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
     log.info("ContextGarden daemon listening on %s", addrs)
 
-    # Start HTTP control plane
-    from aiohttp import web as _web
+    # Start HTTP server (Starlette + MCP via StreamableHTTP)
+    import uvicorn
     from .http_server import make_http_app, HTTP_PORT
-    http_app = make_http_app(_daemon, DATA_DIR)
-    http_runner = _web.AppRunner(http_app)
-    await http_runner.setup()
-    http_site = _web.TCPSite(http_runner, "0.0.0.0", HTTP_PORT)
-    await http_site.start()
-    log.info("HTTP control plane on http://0.0.0.0:%d", HTTP_PORT)
+    starlette_app = make_http_app(_daemon, DATA_DIR)
+    uv_config = uvicorn.Config(starlette_app, host="0.0.0.0", port=HTTP_PORT, loop="none", log_level="warning")
+    uv_server = uvicorn.Server(uv_config)
+    asyncio.create_task(uv_server.serve())
+    log.info("HTTP server on http://0.0.0.0:%d (MCP at /mcp)", HTTP_PORT)
 
     asyncio.ensure_future(_periodic_metrics())
     asyncio.create_task(_boot_workspaces_in_background())
@@ -1444,7 +1443,7 @@ async def _run_server() -> None:
     async with server:
         await _shutdown_event.wait()
 
-    await http_runner.cleanup()
+    uv_server.should_exit = True
     log.info("Daemon shutting down")
 
 

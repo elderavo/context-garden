@@ -1,5 +1,108 @@
 ﻿# Refactor Program: Python Ownership + FP Core / OO Shell
 
+### Alex's Notes (Authoritative Contract)
+- Responsibility is assigned to modules, not to languages.
+- Zod schema definitions stay at the MCP boundary; runtime requests send validated payloads, not schema metadata.
+
+1. Module ownership and boundaries
+   - `mcp/*` owns MCP protocol surface: tool schemas, input validation, and Claude-facing response formatting.
+   - `web_server/*` owns HTTP routing and request/response adaptation only.
+   - `context_engine/*` owns orchestration/use-cases and retrieval/index/sync flows.
+   - `infra/*` owns side-effect adapters (git/fs/queue/persistence/index/mirror/llm providers).
+   - `daemon/*` owns runtime hosting/lifecycle and internal RPC dispatch.
+   - `shared/*` owns cross-module types, config models, and utility primitives.
+2. Network surfaces and ports
+   - `7433` = HTTP control plane and query API (`/api/*`, webhook endpoint, status/control routes).
+   - `7432` = internal daemon JSON-RPC transport only (never exposed as MCP endpoint).
+3. Daemon lifecycle and failure behavior
+   - Callers may connect/probe/retry and surface failures.
+   - Runtime lifecycle policy (startup health, reconnect expectations, shutdown semantics) is defined at daemon/control-plane module boundaries.
+4. Security and secrets
+   - API keys come from env/secret storage only.
+   - Secrets must never be persisted in plaintext logs, workspace registry, or API responses.
+   - Control-plane outputs redact sensitive fields by default.
+5. Context engine scope
+   - Baseline remains LlamaIndex + graph retrieval for this migration.
+   - Future backend changes (for example Neo4j/GNN) are out-of-scope unless approved by separate RFC.
+6. What right looks like (folder structure)
+   - This is the target structure for steady state after cutover and cleanup:
+
+```text
+modules/
+  mcp/                         # MCP protocol boundary
+    responsibilities:
+      - define tool schemas and validate inputs
+      - translate tool calls to web_server APIs
+      - format responses for Claude
+    submodules:
+      - server
+      - tools
+      - schemas
+      - formatters
+
+  web_server/                  # HTTP ingress/egress adapter
+    responsibilities:
+      - route matching and auth extraction
+      - request/response DTO mapping
+      - HTTP status/error mapping
+      - expose webhook endpoint as transport adapter only
+    submodules:
+      - app
+      - routes (health, daemon_control, workspace, query, webhooks)
+      - middleware
+      - dto
+
+  context_engine/              # use-cases + domain decisions
+    responsibilities:
+      - orchestrate retrieve/find-path/note/stats workflows
+      - orchestrate workspace/sync flows
+      - process webhook semantics (verify, normalize, dedupe, publish)
+      - own business rules/state transitions (not HTTP concerns)
+    submodules:
+      - api (query_service, workspace_service, sync_service, webhook_service)
+      - domain (retrieval, sync, webhook)
+      - ports
+
+  infra/                       # side-effect implementations of ports
+    responsibilities:
+      - persistence, queues, git, mirroring, indexing, llm providers, logging
+      - implement interfaces defined in context_engine/ports
+    submodules:
+      - repo
+      - queue
+      - git
+      - mirror
+      - indexer
+      - llm
+      - logging
+
+  daemon/                      # runtime host + internal RPC boundary
+    responsibilities:
+      - process lifecycle and health
+      - internal JSON-RPC server and dispatch
+      - dependency wiring/composition of context_engine + infra
+    submodules:
+      - host
+      - rpc_server
+      - dispatcher
+
+  shared/                      # cross-module primitives
+    responsibilities:
+      - typed events/ids/errors
+      - shared config models and utility primitives
+    submodules:
+      - config
+      - types
+```
+
+7. Acceptance criteria for this direction
+   - MCP workflows run through `mcp/*` -> `web_server/*` query/control APIs without business-logic duplication.
+   - Runtime state and orchestration decisions are centralized in `context_engine/*` and `daemon/*`.
+   - Legacy workspace/mirror orchestration paths are removed from MCP-facing modules after cutover.
+---
+
+
+
 This document is a long-running implementation program, not just an architecture sketch.
 
 Goals:

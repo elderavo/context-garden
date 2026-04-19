@@ -1,11 +1,15 @@
-"""HTTP control plane for the ContextGarden daemon.
+"""HTTP server for ContextGarden — Starlette + uvicorn.
 
-Serves on port 7433 (CG_WEBAPP_PORT) alongside the TCP JSON-RPC server.
-Routes mirror webapp/server.ts 1-to-1.
+Serves on port 7433 (CG_WEBAPP_PORT):
+  /          — webapp SPA
+  /api/*     — REST control plane
+  /webhooks/ — GitLab push webhooks
+  /mcp       — MCP StreamableHTTP (Claude Code / agents)
 """
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import datetime
 import json
@@ -15,7 +19,11 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from aiohttp import web
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Mount, Route
+
 from .app.services import workspace_service
 from .app.services.events import WorkspaceSyncRequested
 from .infra.git.subprocess_git_client import SubprocessGitClient
@@ -98,19 +106,19 @@ def _save_workspaces(entries: list[dict[str, Any]]) -> None:
 # ── Route handlers ────────────────────────────────────────────────────────────
 
 
-async def _handle_index(_req: web.Request) -> web.Response:
+async def _handle_index(_req: Request) -> Response:
     index_path = _static_dir / "index.html"
     if not index_path.exists():
-        return web.Response(status=404, text="Dashboard not found")
-    return web.Response(body=index_path.read_bytes(), content_type="text/html")
+        return Response("Dashboard not found", status_code=404, media_type="text/plain")
+    return Response(content=index_path.read_bytes(), media_type="text/html")
 
 
-async def _handle_gitlab_webhook(req: web.Request) -> web.Response:
+async def _handle_gitlab_webhook(req: Request) -> JSONResponse:
     from .app.services import webhook_service
 
     token = req.headers.get("X-Gitlab-Token")
     workspaces = _load_workspaces()
-    headers = {key: value for key, value in req.headers.items()}
+    headers = dict(req.headers)
 
     try:
         payload = await req.json()
@@ -126,20 +134,19 @@ async def _handle_gitlab_webhook(req: web.Request) -> web.Response:
         event_bus=_event_bus_ref,
         inbox_repository=_webhook_inbox_repo_ref,
     )
-    return web.json_response(result.body, status=result.status)
+    return JSONResponse(result.body, status_code=result.status)
 
 
-async def _handle_list_workspaces(_req: web.Request) -> web.Response:
+async def _handle_list_workspaces(_req: Request) -> JSONResponse:
     entries = _load_workspaces()
     all_jobs = _job_queue_ref.list_jobs()
     result = workspace_service.list_workspace_summaries(entries=entries, jobs=all_jobs)
-    return web.json_response(result)
+    return JSONResponse(result)
 
 
 async def _run_workspace_sync_and_reindex(workspace_name: str) -> None:
     if _daemon_ref is None:
         return
-    import asyncio
     try:
         await asyncio.to_thread(_daemon_ref.handle_workspaces_sync, {})
         await asyncio.to_thread(_daemon_ref.handle_index_rebuild, {"name": workspace_name})
@@ -147,14 +154,14 @@ async def _run_workspace_sync_and_reindex(workspace_name: str) -> None:
         log.error("Workspace post-register sync/reindex failed for %s: %s", workspace_name, exc)
 
 
-async def _handle_register_workspace(req: web.Request) -> web.Response:
+async def _handle_register_workspace(req: Request) -> JSONResponse:
     assert _workspace_repo_ref is not None
     assert _mirror_service_ref is not None
 
     try:
         payload = await req.json()
     except Exception:
-        return web.json_response({"error": "Invalid JSON body"}, status=400)
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
     try:
         result = await workspace_service.register_workspace(
@@ -165,12 +172,11 @@ async def _handle_register_workspace(req: web.Request) -> web.Response:
             mirror_service=_mirror_service_ref,
         )
     except Exception as exc:
-        return web.json_response({"error": str(exc)}, status=400)
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
-    import asyncio
     asyncio.create_task(_run_workspace_sync_and_reindex(result.entry["name"]))
 
-    return web.json_response(
+    return JSONResponse(
         {
             "status": "registered",
             "entry": result.entry,
@@ -178,52 +184,51 @@ async def _handle_register_workspace(req: web.Request) -> web.Response:
             "notePaths": result.note_paths,
             "indexing": "running",
         },
-        status=201,
+        status_code=201,
     )
 
 
-async def _handle_workspace_sync(req: web.Request) -> web.Response:
-    workspace_id = req.match_info["id"]
+async def _handle_workspace_sync(req: Request) -> JSONResponse:
+    workspace_id = req.path_params["id"]
     workspaces = _load_workspaces()
     entry = next((w for w in workspaces if w["id"] == workspace_id), None)
     if not entry:
-        return web.json_response({"error": "Workspace not found"}, status=404)
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
     if entry.get("sourceType") != "gitlab":
-        return web.json_response({"error": "Only GitLab workspaces support sync"}, status=400)
+        return JSONResponse({"error": "Only GitLab workspaces support sync"}, status_code=400)
 
     job = _job_queue_ref.enqueue_sync(entry["id"], entry["name"], "manual")
-    return web.json_response({"jobId": job.id, "status": job.status}, status=202)
+    return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
 
 
-async def _handle_workspace_index(req: web.Request) -> web.Response:
-    workspace_id = req.match_info["id"]
+async def _handle_workspace_index(req: Request) -> JSONResponse:
+    workspace_id = req.path_params["id"]
     workspaces = _load_workspaces()
     entry = next((w for w in workspaces if w["id"] == workspace_id), None)
     if not entry:
-        return web.json_response({"error": "Workspace not found"}, status=404)
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
     job = _job_queue_ref.enqueue_index(entry["id"], entry["name"], "manual")
-    return web.json_response({"jobId": job.id, "status": job.status}, status=202)
+    return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
 
 
-async def _handle_workspace_unregister(req: web.Request) -> web.Response:
+async def _handle_workspace_unregister(req: Request) -> JSONResponse:
     assert _daemon_ref is not None
     assert _workspace_repo_ref is not None
 
-    workspace_id = req.match_info["id"]
+    workspace_id = req.path_params["id"]
     result = workspace_service.unregister_workspace(
         workspace_id=workspace_id,
         data_dir=_data_dir_ref,
         workspace_repository=_workspace_repo_ref,
     )
     if not result.removed:
-        return web.json_response({"error": "Workspace not found"}, status=404)
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
-    import asyncio
     daemon_result = await asyncio.to_thread(
         _daemon_ref.handle_workspaces_sync, {}
     )
-    return web.json_response(
+    return JSONResponse(
         {
             "status": "unregistered",
             "removed": result.removed,
@@ -233,8 +238,8 @@ async def _handle_workspace_unregister(req: web.Request) -> web.Response:
     )
 
 
-async def _handle_list_jobs(_req: web.Request) -> web.Response:
-    return web.json_response([
+async def _handle_list_jobs(_req: Request) -> JSONResponse:
+    return JSONResponse([
         {
             "id": j.id,
             "type": j.type,
@@ -249,42 +254,39 @@ async def _handle_list_jobs(_req: web.Request) -> web.Response:
     ])
 
 
-async def _handle_get_job(req: web.Request) -> web.Response:
-    job = _job_queue_ref.get_job(req.match_info["id"])
+async def _handle_get_job(req: Request) -> JSONResponse:
+    job = _job_queue_ref.get_job(req.path_params["id"])
     if not job:
-        return web.json_response({"error": "Job not found"}, status=404)
-    return web.json_response(job.to_dict())
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse(job.to_dict())
 
 
-async def _handle_status(_req: web.Request) -> web.Response:
+async def _handle_status(_req: Request) -> JSONResponse:
     assert _daemon_ref is not None
-    import asyncio
     try:
         health = await asyncio.to_thread(_daemon_ref.handle_daemon_health, {})
-        return web.json_response(health)
+        return JSONResponse(health)
     except Exception:
-        return web.json_response({"status": "stopped"})
+        return JSONResponse({"status": "stopped"})
 
 
-async def _handle_daemon_stop(_req: web.Request) -> web.Response:
+async def _handle_daemon_stop(_req: Request) -> JSONResponse:
     assert _daemon_ref is not None
-    import asyncio
     result = await asyncio.to_thread(_daemon_ref.handle_daemon_shutdown, {})
-    return web.json_response(result)
+    return JSONResponse(result)
 
 
-async def _handle_activity(_req: web.Request) -> web.Response:
-    return web.json_response(list(_activity_ring))
+async def _handle_activity(_req: Request) -> JSONResponse:
+    return JSONResponse(list(_activity_ring))
 
 
-async def _handle_api_retrieve(req: web.Request) -> web.Response:
+async def _handle_api_retrieve(req: Request) -> JSONResponse:
     assert _daemon_ref is not None
-    import asyncio
 
     try:
         payload = await req.json()
     except Exception:
-        return web.json_response({"error": "Invalid JSON body"}, status=400)
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
     params: dict[str, Any] = {
         "query": payload.get("query"),
@@ -293,28 +295,27 @@ async def _handle_api_retrieve(req: web.Request) -> web.Response:
         "workspace_id": payload.get("workspace_id"),
     }
     if not params["query"]:
-        return web.json_response({"error": "query is required"}, status=400)
+        return JSONResponse({"error": "query is required"}, status_code=400)
 
     try:
         result = await asyncio.to_thread(_daemon_ref.handle_query_retrieve, params)
     except Exception as exc:
-        return web.json_response({"error": str(exc)}, status=500)
-    return web.json_response(result)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(result)
 
 
-async def _handle_api_find_path(req: web.Request) -> web.Response:
+async def _handle_api_find_path(req: Request) -> JSONResponse:
     assert _daemon_ref is not None
-    import asyncio
 
     try:
         payload = await req.json()
     except Exception:
-        return web.json_response({"error": "Invalid JSON body"}, status=400)
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
     start = payload.get("start")
     end = payload.get("end")
     if not start or not end:
-        return web.json_response({"error": "start and end are required"}, status=400)
+        return JSONResponse({"error": "start and end are required"}, status_code=400)
 
     params: dict[str, Any] = {
         "start": start,
@@ -327,15 +328,15 @@ async def _handle_api_find_path(req: web.Request) -> web.Response:
     try:
         result = await asyncio.to_thread(_daemon_ref.handle_query_find_path, params)
     except Exception as exc:
-        return web.json_response({"error": str(exc)}, status=500)
-    return web.json_response(result)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(result)
 
 
-async def _handle_api_rate(req: web.Request) -> web.Response:
+async def _handle_api_rate(req: Request) -> JSONResponse:
     try:
         payload = await req.json()
     except Exception:
-        return web.json_response({"error": "Invalid JSON body"}, status=400)
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
     retrieval_id = payload.get("retrieval_id")
     query = payload.get("query")
@@ -344,9 +345,9 @@ async def _handle_api_rate(req: web.Request) -> web.Response:
     missing = payload.get("missing", "")
 
     if not retrieval_id or not query:
-        return web.json_response({"error": "retrieval_id and query are required"}, status=400)
+        return JSONResponse({"error": "retrieval_id and query are required"}, status_code=400)
     if not isinstance(score, int) or score < 1 or score > 5:
-        return web.json_response({"error": "score must be an integer in range 1-5"}, status=400)
+        return JSONResponse({"error": "score must be an integer in range 1-5"}, status_code=400)
 
     item = {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -357,38 +358,34 @@ async def _handle_api_rate(req: web.Request) -> web.Response:
         "missing": missing,
     }
     _rate_ring.appendleft(item)
-    return web.json_response({"status": "recorded"})
+    return JSONResponse({"status": "recorded"})
 
 
-async def _handle_api_note(req: web.Request) -> web.Response:
+async def _handle_api_note(req: Request) -> JSONResponse:
     assert _daemon_ref is not None
-    import asyncio
 
-    relative_path = req.query.get("relative_path", "").strip()
+    relative_path = req.query_params.get("relative_path", "").strip()
     if not relative_path:
-        return web.json_response({"error": "relative_path is required"}, status=400)
+        return JSONResponse({"error": "relative_path is required"}, status_code=400)
 
-    params: dict[str, Any] = {
-        "relative_path": relative_path,
-    }
-    workspace_id = req.query.get("workspace_id", "").strip()
+    params: dict[str, Any] = {"relative_path": relative_path}
+    workspace_id = req.query_params.get("workspace_id", "").strip()
     if workspace_id:
         params["workspace_id"] = workspace_id
 
     try:
         result = await asyncio.to_thread(_daemon_ref.handle_query_get_note_content, params)
     except Exception as exc:
-        return web.json_response({"error": str(exc)}, status=500)
-    return web.json_response(result)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(result)
 
 
-async def _handle_api_stats(req: web.Request) -> web.Response:
+async def _handle_api_stats(req: Request) -> JSONResponse:
     assert _daemon_ref is not None
-    import asyncio
 
     params: dict[str, Any] = {}
-    workspace = req.query.get("workspace", "").strip()
-    workspace_id = req.query.get("workspace_id", "").strip()
+    workspace = req.query_params.get("workspace", "").strip()
+    workspace_id = req.query_params.get("workspace_id", "").strip()
     if workspace:
         params["workspace"] = workspace
     if workspace_id:
@@ -397,16 +394,13 @@ async def _handle_api_stats(req: web.Request) -> web.Response:
     try:
         result = await asyncio.to_thread(_daemon_ref.handle_query_stats, params)
     except Exception as exc:
-        return web.json_response({"error": str(exc)}, status=500)
-    return web.json_response(result)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(result)
 
 
-async def _handle_daemon_restart(_req: web.Request) -> web.Response:
-    import asyncio
-    # Just exit — the TS daemon-client detects the TCP drop and respawns.
-    # Spawning our own subprocess here races with that and causes double-starts.
+async def _handle_daemon_restart(_req: Request) -> JSONResponse:
     asyncio.get_running_loop().call_later(0.25, lambda: os._exit(0))
-    return web.json_response({"status": "restarting"})
+    return JSONResponse({"status": "restarting"})
 
 
 async def _on_workspace_sync_requested(event: WorkspaceSyncRequested) -> None:
@@ -417,7 +411,7 @@ async def _on_workspace_sync_requested(event: WorkspaceSyncRequested) -> None:
 # ── App factory ───────────────────────────────────────────────────────────────
 
 
-def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> web.Application:
+def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> Starlette:
     global _daemon_ref, _data_dir_ref, _workspace_repo_ref, _webhook_inbox_repo_ref, _event_bus_ready
     global _mirror_service_ref
     _daemon_ref = daemon
@@ -435,36 +429,48 @@ def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> web.Application:
         _event_bus_ref.subscribe(WorkspaceSyncRequested, _on_workspace_sync_requested)
         _event_bus_ready = True
 
-    app = web.Application()
+    from .mcp_tools import create_mcp_server
+    mcp_server = create_mcp_server(
+        daemon=daemon,
+        data_dir=data_dir,
+        job_queue=_job_queue_ref,
+        workspace_repo=_workspace_repo_ref,
+        mirror_service=_mirror_service_ref,
+        activity_ring=_activity_ring,
+    )
 
-    app.router.add_get("/", _handle_index)
-    app.router.add_post("/webhooks/gitlab", _handle_gitlab_webhook)
+    routes = [
+        Route("/", _handle_index, methods=["GET"]),
+        Route("/webhooks/gitlab", _handle_gitlab_webhook, methods=["POST"]),
 
-    app.router.add_post("/api/workspaces", _handle_register_workspace)
-    app.router.add_get("/api/workspaces", _handle_list_workspaces)
-    app.router.add_get("/workspaces", _handle_list_workspaces)
-    app.router.add_post("/workspaces/{id}/sync", _handle_workspace_sync)
-    app.router.add_post("/workspaces/{id}/index", _handle_workspace_index)
-    app.router.add_post("/workspaces/{id}/unregister", _handle_workspace_unregister)
-    app.router.add_post("/api/workspaces/{id}/unregister", _handle_workspace_unregister)
+        Route("/api/workspaces", _handle_register_workspace, methods=["POST"]),
+        Route("/api/workspaces", _handle_list_workspaces, methods=["GET"]),
+        Route("/workspaces", _handle_list_workspaces, methods=["GET"]),
+        Route("/workspaces/{id}/sync", _handle_workspace_sync, methods=["POST"]),
+        Route("/workspaces/{id}/index", _handle_workspace_index, methods=["POST"]),
+        Route("/workspaces/{id}/unregister", _handle_workspace_unregister, methods=["POST"]),
+        Route("/api/workspaces/{id}/unregister", _handle_workspace_unregister, methods=["POST"]),
 
-    app.router.add_get("/jobs", _handle_list_jobs)
-    app.router.add_get("/jobs/{id}", _handle_get_job)
-    app.router.add_get("/api/jobs", _handle_list_jobs)
-    app.router.add_get("/api/jobs/{id}", _handle_get_job)
+        Route("/jobs", _handle_list_jobs, methods=["GET"]),
+        Route("/jobs/{id}", _handle_get_job, methods=["GET"]),
+        Route("/api/jobs", _handle_list_jobs, methods=["GET"]),
+        Route("/api/jobs/{id}", _handle_get_job, methods=["GET"]),
 
-    app.router.add_get("/api/activity", _handle_activity)
-    app.router.add_post("/api/retrieve", _handle_api_retrieve)
-    app.router.add_post("/api/find-path", _handle_api_find_path)
-    app.router.add_post("/api/rate", _handle_api_rate)
-    app.router.add_get("/api/note", _handle_api_note)
-    app.router.add_get("/api/stats", _handle_api_stats)
+        Route("/api/activity", _handle_activity, methods=["GET"]),
+        Route("/api/retrieve", _handle_api_retrieve, methods=["POST"]),
+        Route("/api/find-path", _handle_api_find_path, methods=["POST"]),
+        Route("/api/rate", _handle_api_rate, methods=["POST"]),
+        Route("/api/note", _handle_api_note, methods=["GET"]),
+        Route("/api/stats", _handle_api_stats, methods=["GET"]),
 
-    app.router.add_get("/status", _handle_status)
-    app.router.add_get("/api/status", _handle_status)
+        Route("/status", _handle_status, methods=["GET"]),
+        Route("/api/status", _handle_status, methods=["GET"]),
 
-    app.router.add_post("/daemon/stop", _handle_daemon_stop)
-    app.router.add_post("/api/daemon/stop", _handle_daemon_stop)
-    app.router.add_post("/api/daemon/restart", _handle_daemon_restart)
+        Route("/daemon/stop", _handle_daemon_stop, methods=["POST"]),
+        Route("/api/daemon/stop", _handle_daemon_stop, methods=["POST"]),
+        Route("/api/daemon/restart", _handle_daemon_restart, methods=["POST"]),
 
-    return app
+        Mount("/mcp", app=mcp_server.streamable_http_app()),
+    ]
+
+    return Starlette(routes=routes)
