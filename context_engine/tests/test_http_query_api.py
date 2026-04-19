@@ -5,13 +5,13 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-from graph import http_server
+from context_engine import http_server
 
 
 class _FakeRequest:
     def __init__(self, *, json_body: dict[str, Any] | None = None, query: dict[str, str] | None = None) -> None:
         self._json_body = json_body if json_body is not None else {}
-        self.query = query if query is not None else {}
+        self.query_params = query if query is not None else {}
 
     async def json(self) -> dict[str, Any]:
         return self._json_body
@@ -49,7 +49,7 @@ async def _direct_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-d
 
 
 def _json(resp: Any) -> dict[str, Any]:
-    return json.loads(resp.text)
+    return json.loads(resp.body.decode("utf-8"))
 
 
 class HttpQueryApiTests(unittest.IsolatedAsyncioTestCase):
@@ -61,7 +61,7 @@ class HttpQueryApiTests(unittest.IsolatedAsyncioTestCase):
             resp = await http_server._handle_api_retrieve(
                 _FakeRequest(json_body={"query": "how auth works", "top_k": 5, "workspace": "alpha"})
             )
-        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.status_code, 200)
         body = _json(resp)
         self.assertIn("seed_notes", body)
         self.assertEqual(body["seed_notes"][0]["workspace"], "alpha")
@@ -71,7 +71,7 @@ class HttpQueryApiTests(unittest.IsolatedAsyncioTestCase):
             resp = await http_server._handle_api_find_path(
                 _FakeRequest(json_body={"start": "a", "end": "b", "max_depth": 3})
             )
-        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.status_code, 200)
         body = _json(resp)
         self.assertEqual(body["start_id"], "a")
         self.assertEqual(body["end_id"], "b")
@@ -80,7 +80,7 @@ class HttpQueryApiTests(unittest.IsolatedAsyncioTestCase):
         bad = await http_server._handle_api_rate(
             _FakeRequest(json_body={"retrieval_id": "r1", "query": "q", "score": 9})
         )
-        self.assertEqual(bad.status, 400)
+        self.assertEqual(bad.status_code, 400)
 
         ok = await http_server._handle_api_rate(
             _FakeRequest(
@@ -93,7 +93,7 @@ class HttpQueryApiTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
-        self.assertEqual(ok.status, 200)
+        self.assertEqual(ok.status_code, 200)
         self.assertEqual(_json(ok)["status"], "recorded")
 
     async def test_note_endpoint(self) -> None:
@@ -101,14 +101,14 @@ class HttpQueryApiTests(unittest.IsolatedAsyncioTestCase):
             resp = await http_server._handle_api_note(
                 _FakeRequest(query={"relative_path": "code/alpha/a.md"})
             )
-        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.status_code, 200)
         body = _json(resp)
         self.assertEqual(body["body"], "note:code/alpha/a.md")
 
     async def test_stats_endpoint(self) -> None:
         with patch("asyncio.to_thread", new=_direct_to_thread):
             resp = await http_server._handle_api_stats(_FakeRequest(query={}))
-        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.status_code, 200)
         body = _json(resp)
         self.assertEqual(body["doc_count"], 3)
         self.assertTrue(body["index_loaded"])
@@ -116,4 +116,3 @@ class HttpQueryApiTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

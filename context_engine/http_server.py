@@ -32,6 +32,7 @@ from .infra.repo.workspace_json_repo import WorkspaceJsonRepository
 from .infra.repo.webhook_inbox_sqlite import WebhookInboxSqliteRepository
 from .infra.queue.inproc_event_bus import InProcEventBus
 from .infra.queue.inproc_job_queue import InProcJobQueue
+from .runtime_paths import resolve_mirror_cli
 
 if TYPE_CHECKING:
     from .server import _DaemonServer
@@ -420,7 +421,7 @@ def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> Starlette:
     _workspace_repo_ref = WorkspaceJsonRepository(data_dir)
     _webhook_inbox_repo_ref = WebhookInboxSqliteRepository(data_dir)
     _node_bin = shutil.which("node") or "node"
-    _mirror_cli = str(data_dir / "dist" / "src" / "mirror" / "mirror-cli.js")
+    _mirror_cli = resolve_mirror_cli(data_dir=data_dir)
     _mirror_service_ref = MirrorServiceLegacy(
         data_dir=data_dir,
         node_bin=_node_bin,
@@ -429,16 +430,6 @@ def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> Starlette:
     if not _event_bus_ready:
         _event_bus_ref.subscribe(WorkspaceSyncRequested, _on_workspace_sync_requested)
         _event_bus_ready = True
-
-    from .mcp_tools import create_mcp_server
-    mcp_server = create_mcp_server(
-        daemon=daemon,
-        data_dir=data_dir,
-        job_queue=_job_queue_ref,
-        workspace_repo=_workspace_repo_ref,
-        mirror_service=_mirror_service_ref,
-        activity_ring=_activity_ring,
-    )
 
     routes = [
         Route("/", _handle_index, methods=["GET"]),
@@ -470,8 +461,21 @@ def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> Starlette:
         Route("/daemon/stop", _handle_daemon_stop, methods=["POST"]),
         Route("/api/daemon/stop", _handle_daemon_stop, methods=["POST"]),
         Route("/api/daemon/restart", _handle_daemon_restart, methods=["POST"]),
-
-        Mount("/mcp", app=mcp_server.streamable_http_app()),
     ]
+
+    try:
+        from .mcp_tools import create_mcp_server
+    except ModuleNotFoundError as exc:
+        log.warning("MCP server disabled (optional dependency missing): %s", exc)
+    else:
+        mcp_server = create_mcp_server(
+            daemon=daemon,
+            data_dir=data_dir,
+            job_queue=_job_queue_ref,
+            workspace_repo=_workspace_repo_ref,
+            mirror_service=_mirror_service_ref,
+            activity_ring=_activity_ring,
+        )
+        routes.append(Mount("/mcp", app=mcp_server.streamable_http_app()))
 
     return Starlette(routes=routes)

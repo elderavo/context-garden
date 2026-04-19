@@ -33,7 +33,7 @@ class MirrorOutputCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         fake_proc = _FakeProc(stdout=json.dumps(mirror_result).encode("utf-8"))
         create_proc = AsyncMock(return_value=fake_proc)
 
-        with patch("graph.infra.mirror.mirror_service_legacy.asyncio.create_subprocess_exec", new=create_proc):
+        with patch("context_engine.infra.mirror.mirror_service_legacy.asyncio.create_subprocess_exec", new=create_proc):
             result = await service.run(
                 workspace_entry={"name": "alpha", "languages": ["py"]},
                 gitlab_config={

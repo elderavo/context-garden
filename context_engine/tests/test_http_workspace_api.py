@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from graph import http_server
+from context_engine import http_server
 
 
 class _FakeRequest:
@@ -21,7 +21,7 @@ class _FakeRequest:
     ) -> None:
         self._json_body = json_body if json_body is not None else {}
         self.headers = headers if headers is not None else {}
-        self.match_info = match_info if match_info is not None else {}
+        self.path_params = match_info if match_info is not None else {}
 
     async def json(self) -> dict[str, Any]:
         return self._json_body
@@ -69,7 +69,7 @@ def _make_test_dir(prefix: str) -> Path:
 
 
 def _json_response_body(resp: Any) -> dict[str, Any]:
-    return json.loads(resp.text)
+    return json.loads(resp.body.decode("utf-8"))
 
 
 async def _direct_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -107,7 +107,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-        self.assertEqual(register_resp.status, 201)
+        self.assertEqual(register_resp.status_code, 201)
         register_body = _json_response_body(register_resp)
         self.assertEqual(register_body["status"], "registered")
         self.assertEqual(register_body["entry"]["name"], "alpha-workspace")
@@ -116,7 +116,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("code/alpha-workspace/from-http-api.md", register_body["notePaths"])
 
         list_resp = await http_server._handle_list_workspaces(_FakeRequest())
-        self.assertEqual(list_resp.status, 200)
+        self.assertEqual(list_resp.status_code, 200)
         list_body = _json_response_body(list_resp)
         self.assertEqual(len(list_body), 1)
         self.assertEqual(list_body[0]["name"], "alpha-workspace")
@@ -126,13 +126,13 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
             unregister_resp = await http_server._handle_workspace_unregister(
                 _FakeRequest(match_info={"id": workspace_id})
             )
-        self.assertEqual(unregister_resp.status, 200)
+        self.assertEqual(unregister_resp.status_code, 200)
         unregister_body = _json_response_body(unregister_resp)
         self.assertEqual(unregister_body["status"], "unregistered")
         self.assertGreaterEqual(len(unregister_body["deletedPaths"]), 1)
 
         post_list_resp = await http_server._handle_list_workspaces(_FakeRequest())
-        self.assertEqual(post_list_resp.status, 200)
+        self.assertEqual(post_list_resp.status_code, 200)
         post_list_body = _json_response_body(post_list_resp)
         self.assertEqual(post_list_body, [])
 
@@ -140,7 +140,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
         response = await http_server._handle_register_workspace(
             _FakeRequest(json_body={"name": "missing-source", "languages": ["py"]})
         )
-        self.assertEqual(response.status, 400)
+        self.assertEqual(response.status_code, 400)
         body = _json_response_body(response)
         self.assertIn("Provide either gitlab_url or source_dir", body["error"])
 
@@ -155,7 +155,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-        self.assertEqual(first.status, 201)
+        self.assertEqual(first.status_code, 201)
 
         with patch("asyncio.create_task", new=_drop_task):
             second = await http_server._handle_register_workspace(
@@ -167,7 +167,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-        self.assertEqual(second.status, 400)
+        self.assertEqual(second.status_code, 400)
         body = _json_response_body(second)
         self.assertIn("already exists", body["error"])
 

@@ -1,8 +1,9 @@
 """Job queue for the ContextGarden control plane.
 
-Asyncio-native port of webapp/jobs.ts. Processes jobs serially
-(one worker task per runtime). All state is in-memory; jobs are
-not persisted across daemon restarts.
+Asyncio-native queue with per-workspace workers:
+- Jobs for the same workspace are processed in order.
+- Different workspaces can process concurrently.
+- All state is in-memory and non-persistent.
 
 Job types:
   sync_workspace  - git fetch+reset, mirror, reindex
@@ -57,7 +58,10 @@ class Job:
 
 
 _jobs: list[Job] = []
+# Backward-compat alias used by older tests; points to the most recently created worker.
 _worker_task: Optional[asyncio.Task[None]] = None
+_workspace_queues: dict[str, asyncio.Queue[Job]] = {}
+_workspace_worker_tasks: dict[str, asyncio.Task[None]] = {}
 _data_dir: Path = Path.cwd()
 _node_bin: str = "node"
 _mirror_cli: Optional[str] = None
@@ -89,8 +93,7 @@ def enqueue_sync(
     if existing:
         return existing
     job = _make_job("sync_workspace", workspace_id, workspace_name, triggered_by)
-    _push(job)
-    _schedule_worker()
+    _push_and_schedule(job)
     return job
 
 
@@ -103,8 +106,7 @@ def enqueue_index(
     if existing:
         return existing
     job = _make_job("index_workspace", workspace_id, workspace_name, triggered_by)
-    _push(job)
-    _schedule_worker()
+    _push_and_schedule(job)
     return job
 
 
@@ -146,10 +148,17 @@ def _make_job(
     )
 
 
-def _push(job: Job) -> None:
+def _push_and_schedule(job: Job) -> None:
     _jobs.append(job)
     if len(_jobs) > MAX_HISTORY:
         del _jobs[: len(_jobs) - MAX_HISTORY]
+
+    queue = _workspace_queues.get(job.workspace_id)
+    if queue is None:
+        queue = asyncio.Queue()
+        _workspace_queues[job.workspace_id] = queue
+    queue.put_nowait(job)
+    _schedule_workspace_worker(job.workspace_id)
 
 
 def _log(job: Job, line: str) -> None:
@@ -158,35 +167,67 @@ def _log(job: Job, line: str) -> None:
     job.log.append(f"[{datetime.now(timezone.utc).isoformat()}] {line}")
 
 
-def _schedule_worker() -> None:
+def _schedule_workspace_worker(workspace_id: str) -> None:
     global _worker_task
-    if _worker_task is None or _worker_task.done():
-        _worker_task = asyncio.ensure_future(_run_worker())
+
+    existing = _workspace_worker_tasks.get(workspace_id)
+    if existing is not None and not existing.done():
+        return
+
+    task = asyncio.create_task(_run_workspace_worker(workspace_id))
+    _workspace_worker_tasks[workspace_id] = task
+    _worker_task = task
+
+    def _cleanup(done_task: asyncio.Task[None]) -> None:
+        current = _workspace_worker_tasks.get(workspace_id)
+        if current is done_task:
+            _workspace_worker_tasks.pop(workspace_id, None)
+        queue = _workspace_queues.get(workspace_id)
+        if queue is not None and queue.empty():
+            _workspace_queues.pop(workspace_id, None)
+
+    task.add_done_callback(_cleanup)
 
 
-async def _run_worker() -> None:
+async def _run_workspace_worker(workspace_id: str) -> None:
     from datetime import datetime, timezone
 
-    while True:
-        job = next((j for j in _jobs if j.status == "pending"), None)
-        if not job:
-            return
+    queue = _workspace_queues.get(workspace_id)
+    if queue is None:
+        return
 
-        job.status = "running"
-        job.started_at = datetime.now(timezone.utc).isoformat()
+    while True:
+        try:
+            job = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            # Yield once before shutdown so late enqueues can schedule cleanly.
+            await asyncio.sleep(0)
+            try:
+                job = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
         try:
-            if job.type == "sync_workspace":
-                await _execute_sync_job(job)
-            else:
-                await _execute_index_job(job)
-            job.status = "done"
-        except Exception as exc:
-            job.status = "failed"
-            _log(job, f"Error: {exc}")
-            log.error("Job %s failed: %s", job.id, exc)
+            if job.status != "pending":
+                continue
 
-        job.completed_at = datetime.now(timezone.utc).isoformat()
+            job.status = "running"
+            job.started_at = datetime.now(timezone.utc).isoformat()
+
+            try:
+                if job.type == "sync_workspace":
+                    await _execute_sync_job(job)
+                else:
+                    await _execute_index_job(job)
+                job.status = "done"
+            except Exception as exc:
+                job.status = "failed"
+                _log(job, f"Error: {exc}")
+                log.error("Job %s failed: %s", job.id, exc)
+            finally:
+                job.completed_at = datetime.now(timezone.utc).isoformat()
+        finally:
+            queue.task_done()
 
 
 def _require_orchestrator() -> sync_orchestrator_adapter.SyncOrchestrator:
@@ -203,4 +244,3 @@ async def _execute_sync_job(job: Job) -> None:
 async def _execute_index_job(job: Job) -> None:
     orchestrator = _require_orchestrator()
     await orchestrator.execute_index(job=job, log=lambda line: _log(job, line))
-

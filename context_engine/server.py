@@ -25,6 +25,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Optional
 
+from .runtime_paths import resolve_mirror_cli
+
 # ── Config ──────────────────────────────────────────────────────────────────
 
 MAX_PENDING_JOBS = 50
@@ -939,7 +941,7 @@ def main(data_dir: Optional[str] = None) -> None:
     _server.load_registry()
 
     _node_bin = shutil.which("node") or "node"
-    _mirror_cli = str(DATA_DIR / "dist" / "src" / "mirror" / "mirror-cli.js")
+    _mirror_cli = resolve_mirror_cli(data_dir=DATA_DIR)
     from .core import jobs as _jobs
     _jobs.init(DATA_DIR, _node_bin, _mirror_cli, lambda: _server)
 
