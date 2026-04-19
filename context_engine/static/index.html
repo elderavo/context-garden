@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ContextGarden</title>
+  <style>
+    :root {
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --raised:  #1c2128;
+      --border:  #21262d;
+      --text:    #e6edf3;
+      --muted:   #7d8590;
+      --dim:     #8b949e;
+      --green:   #3fb950;
+      --red:     #f85149;
+      --yellow:  #d29922;
+      --blue:    #58a6ff;
+      --indigo:  #818cf8;
+      --purple:  #bc8cff;
+      --orange:  #ffa657;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+      height: 52px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+
+    .logo { font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
+    .logo em { color: var(--green); font-style: normal; }
+
+    .header-right { display: flex; align-items: center; gap: 16px; }
+
+    .daemon-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+      transition: border-color 0.3s, color 0.3s;
+    }
+    .daemon-pill.running { border-color: rgba(63,185,80,0.35); color: var(--green); }
+    .daemon-pill.stopped { border-color: rgba(248,81,73,0.35); color: var(--red); }
+
+    .meta { color: var(--muted); font-size: 11px; }
+
+    /* ── Tab nav ─────────────────────────────────────────────────────────── */
+    .tab-nav {
+      display: flex;
+      padding: 0 28px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 52px;
+      z-index: 19;
+    }
+
+    .tab-btn {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 11px 16px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 500;
+      color: var(--muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      cursor: pointer;
+      letter-spacing: 0.02em;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--text); border-bottom-color: var(--green); }
+    .tab-btn:active { transform: none; opacity: 1; }
+
+    .tab-count {
+      padding: 1px 6px;
+      border-radius: 10px;
+      background: var(--raised);
+      border: 1px solid var(--border);
+      font-size: 10px;
+      color: var(--muted);
+      transition: background 0.3s, color 0.3s, border-color 0.3s;
+    }
+    .tab-count.live {
+      background: rgba(63,185,80,0.12);
+      border-color: rgba(63,185,80,0.3);
+      color: var(--green);
+    }
+
+    /* ── Tab panels ─────────────────────────────────────────────────────── */
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ── Main layout ─────────────────────────────────────────────────────── */
+    main { padding: 20px 28px; max-width: 1140px; }
+
+    .grid-top {
+      display: grid;
+      grid-template-columns: 256px 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+    }
+    .card-title {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    /* ── Daemon card ─────────────────────────────────────────────────────── */
+    .status-line { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; transition: background 0.3s, box-shadow 0.3s; }
+    .dot.running { background: var(--green); box-shadow: 0 0 8px rgba(63,185,80,0.5); }
+    .dot.stopped { background: var(--red); box-shadow: none; }
+    .dot.pending { background: var(--yellow); animation: blink 1s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    .status-label { font-size: 14px; font-weight: 600; }
+
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+    .stat-label { font-size: 10px; color: var(--muted); margin-bottom: 3px; letter-spacing: 0.06em; text-transform: uppercase; }
+    .stat-value { font-size: 15px; font-weight: 600; }
+    .stat-value.dim { color: var(--dim); }
+
+    .btn-row { display: flex; gap: 8px; }
+    button {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.02em;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    button:active { transform: scale(0.97); }
+    button:hover:not(:disabled) { opacity: 0.75; }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-restart { background: rgba(210,153,34,0.12); color: var(--yellow); border: 1px solid rgba(210,153,34,0.25); }
+    .btn-sync  {
+      padding: 3px 9px;
+      background: rgba(88,166,255,0.08);
+      color: var(--blue);
+      border: 1px solid rgba(88,166,255,0.2);
+      border-radius: 4px;
+      font-size: 11px;
+    }
+    .btn-sync:hover:not(:disabled) { background: rgba(88,166,255,0.15); opacity: 1; }
+
+    /* ── Overview card ───────────────────────────────────────────────────── */
+    .overview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .ov-label { font-size: 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
+    .ov-value { font-size: 28px; font-weight: 700; line-height: 1; }
+    .ov-sub   { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    /* ── Tables ──────────────────────────────────────────────────────────── */
+    .table-card { margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      text-align: left;
+      padding: 0 12px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    tbody td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr.job-row-main:last-of-type td { border-bottom: 1px solid var(--border); }
+    .empty-row td { color: var(--muted); text-align: center; padding: 28px; font-style: italic; }
+
+    /* ── Badges ──────────────────────────────────────────────────────────── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .badge.idle          { background: rgba(125,133,144,0.15); color: var(--dim); }
+    .badge.indexing      { background: rgba(88,166,255,0.12);  color: var(--blue); }
+    .badge.paused        { background: rgba(210,153,34,0.12);  color: var(--yellow); }
+    .badge.error         { background: rgba(248,81,73,0.12);   color: var(--red); }
+    .badge.uninitialized { background: rgba(125,133,144,0.1);  color: var(--muted); }
+    .badge.pending  { background: rgba(210,153,34,0.12);  color: var(--yellow); }
+    .badge.running  { background: rgba(88,166,255,0.12);  color: var(--blue); }
+    .badge.done     { background: rgba(63,185,80,0.12);   color: var(--green); }
+    .badge.failed   { background: rgba(248,81,73,0.12);   color: var(--red); }
+
+    .badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: blink 0.8s ease-in-out infinite; }
+
+    .path-cell { color: var(--muted); font-size: 11px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mono { color: var(--indigo); }
+    .watcher-on  { color: var(--green); }
+    .watcher-off { color: var(--muted); }
+
+    .btn-unregister {
+      padding: 3px 8px;
+      background: transparent;
+      border: 1px solid rgba(248,81,73,0.2);
+      color: var(--muted);
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .btn-unregister:hover { color: var(--red); border-color: rgba(248,81,73,0.5); opacity: 1; }
+    .btn-unregister:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    /* ── Jobs tab ────────────────────────────────────────────────────────── */
+    .jobs-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .filter-group {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .filter-btn {
+      padding: 5px 12px;
+      font-size: 11px;
+      font-family: inherit;
+      font-weight: 500;
+      color: var(--muted);
+      background: var(--surface);
+      border: none;
+      border-right: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.1s, color 0.1s;
+    }
+    .filter-btn:last-child { border-right: none; }
+    .filter-btn:hover { background: var(--raised); color: var(--text); }
+    .filter-btn.active { background: var(--raised); color: var(--text); }
+    .filter-btn:active { transform: none; opacity: 1; }
+
+    .ws-select {
+      padding: 5px 10px;
+      font-size: 11px;
+      font-family: inherit;
+      color: var(--text);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      outline: none;
+    }
+    .ws-select option { background: var(--surface); }
+
+    .live-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--green);
+      padding: 3px 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(63,185,80,0.25);
+      background: rgba(63,185,80,0.06);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .live-pill.visible { opacity: 1; }
+    .live-pill-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: blink 1s ease-in-out infinite; }
+
+    /* Job rows */
+    .job-row-main td { cursor: pointer; }
+    .job-row-main:hover td { background: var(--raised); }
+
+    .job-log-row { display: none; }
+    .job-log-row.open { display: table-row; }
+    .job-log-row td { padding: 0; border-bottom: 1px solid var(--border); background: var(--bg) !important; }
+    .job-log-row:hover td { background: var(--bg) !important; }
+
+    .log-container {
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+      padding: 10px 16px;
+      max-height: 280px;
+      overflow-y: auto;
+      font-size: 11px;
+      line-height: 1.8;
+    }
+    .log-container::-webkit-scrollbar { width: 5px; }
+    .log-container::-webkit-scrollbar-track { background: transparent; }
+    .log-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .log-line { color: var(--dim); white-space: pre-wrap; word-break: break-all; }
+    .log-line.err  { color: var(--red); }
+    .log-line.warn { color: var(--yellow); }
+    .log-line.ok   { color: var(--green); }
+    .log-loading   { color: var(--muted); font-style: italic; }
+
+    .chevron {
+      display: inline-block;
+      font-size: 9px;
+      color: var(--muted);
+      transition: transform 0.15s;
+      user-select: none;
+    }
+    .job-row-main.expanded .chevron { transform: rotate(90deg); }
+
+    .trigger-webhook { color: var(--purple); font-size: 11px; }
+    .trigger-manual  { color: var(--muted);  font-size: 11px; }
+    .type-sync  { color: var(--blue);   font-size: 11px; }
+    .type-index { color: var(--orange); font-size: 11px; }
+
+    /* ── Activity tab ────────────────────────────────────────────────────── */
+    .act-top-row {
+      display: grid;
+      grid-template-columns: 1fr 260px;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .act-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 24px 0; text-align: center; }
+
+    /* Live job */
+    .act-job-meta { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    .act-log {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      max-height: 240px;
+      overflow-y: auto;
+      font-size: 11px;
+      line-height: 1.8;
+    }
+    .act-log::-webkit-scrollbar { width: 5px; }
+    .act-log::-webkit-scrollbar-track { background: transparent; }
+    .act-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* Connections */
+    .conn-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .conn-item:last-child { border-bottom: none; }
+    .conn-id   { color: var(--indigo); font-size: 11px; }
+    .conn-peer { color: var(--muted);  font-size: 11px; margin-top: 2px; }
+    .conn-calls { font-size: 13px; font-weight: 600; }
+    .conn-delta { font-size: 10px; color: var(--green); margin-left: 4px; }
+
+    /* Retrieval feed */
+    .feed-entry {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .feed-entry:last-child { border-bottom: none; }
+    .feed-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 7px; }
+    .feed-time  { font-size: 10px; color: var(--muted); flex-shrink: 0; min-width: 44px; }
+    .feed-query { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .feed-count { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+    .feed-notes { display: flex; flex-wrap: wrap; gap: 5px; }
+    .feed-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--raised);
+      border: 1px solid var(--border);
+      font-size: 10px;
+      max-width: 280px;
+      cursor: default;
+    }
+    .feed-note.seed     { border-color: rgba(88,166,255,0.2); }
+    .feed-note.expanded { border-color: rgba(188,140,255,0.2); }
+    .feed-note-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+    .feed-note-ws    { color: var(--muted); flex-shrink: 0; }
+    .feed-note-score { color: var(--dim); flex-shrink: 0; }
+    .feed-note-via   { color: var(--purple); font-size: 9px; flex-shrink: 0; }
+
+    .act-live-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      margin-left: 10px;
+      color: var(--green);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Context<em>Garden</em></div>
+  <div class="header-right">
+    <div class="daemon-pill stopped" id="daemon-pill">
+      <div class="dot stopped" id="hdr-dot"></div>
+      <span id="hdr-label">Checking…</span>
+    </div>
+    <div class="meta" id="last-update">—</div>
+  </div>
+</header>
+
+<nav class="tab-nav">
+  <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview',this)">Overview</button>
+  <button class="tab-btn" data-tab="jobs" onclick="switchTab('jobs',this)">
+    Jobs <span class="tab-count" id="tab-jobs-count">—</span>
+  </button>
+  <button class="tab-btn" data-tab="activity" onclick="switchTab('activity',this)">Activity</button>
+</nav>
+
+<!-- ════════════════════════════ OVERVIEW ════════════════════════════════ -->
+<div id="panel-overview" class="tab-panel active">
+<main>
+  <div class="grid-top">
+    <div class="card">
+      <div class="card-title">Daemon</div>
+      <div class="status-line">
+        <div class="dot stopped" id="ov-dot"></div>
+        <div class="status-label" id="ov-label">Checking…</div>
+      </div>
+      <div class="stat-grid">
+        <div>
+          <div class="stat-label">Uptime</div>
+          <div class="stat-value dim" id="stat-uptime">—</div>
+        </div>
+        <div>
+          <div class="stat-label">Memory</div>
+          <div class="stat-value dim" id="stat-memory">—</div>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn-restart" id="btn-restart" onclick="restartDaemon()" disabled>Restart</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Overview</div>
+      <div class="overview-grid">
+        <div>
+          <div class="ov-label">Workspaces</div>
+          <div class="ov-value" id="ov-workspaces">—</div>
+          <div class="ov-sub">registered</div>
+        </div>
+        <div>
+          <div class="ov-label">Documents</div>
+          <div class="ov-value" id="ov-docs">—</div>
+          <div class="ov-sub">indexed</div>
+        </div>
+        <div>
+          <div class="ov-label">Connections</div>
+          <div class="ov-value" id="ov-conns">—</div>
+          <div class="ov-sub">active</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card table-card">
+    <div class="card-title">Workspaces</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>State</th><th>Docs</th><th>Watcher</th><th>Path</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="ws-body">
+        <tr class="empty-row"><td colspan="6">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card table-card">
+    <div class="card-title">Active Connections</div>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Peer</th><th>Calls</th><th>Since</th></tr>
+      </thead>
+      <tbody id="conn-body">
+        <tr class="empty-row"><td colspan="4">No active connections</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+</div>
+
+<!-- ════════════════════════════ JOBS ════════════════════════════════════ -->
+<div id="panel-jobs" class="tab-panel">
+<main>
+  <div class="jobs-toolbar">
+    <div class="filter-group">
+      <button class="filter-btn active" onclick="setJobFilter('all',this)">All</button>
+      <button class="filter-btn" onclick="setJobFilter('pending',this)">Pending</button>
+      <button class="filter-btn" onclick="setJobFilter('running',this)">Running</button>
+      <button class="filter-btn" onclick="setJobFilter('done',this)">Done</button>
+      <button class="filter-btn" onclick="setJobFilter('failed',this)">Failed</button>
+    </div>
+    <select class="ws-select" id="job-ws-filter" onchange="renderJobs()">
+      <option value="all">All workspaces</option>
+    </select>
+    <div class="live-pill" id="live-pill">
+      <div class="live-pill-dot"></div> LIVE
+    </div>
+  </div>
+
+  <div class="card table-card">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:28px"></th>
+          <th>Workspace</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Trigger</th>
+          <th>Started</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody id="jobs-body">
+        <tr class="empty-row"><td colspan="7">Loading jobs…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+</div>
+
+<!-- ════════════════════════════ ACTIVITY ════════════════════════════════ -->
+<div id="panel-activity" class="tab-panel">
+<main>
+  <div class="act-top-row">
+    <div class="card">
+      <div class="card-title">
+        Current Job
+        <span id="act-job-badge" style="margin-left:8px"></span>
+      </div>
+      <div id="act-job-content">
+        <div class="act-empty">No job running</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Active Connections</div>
+      <div id="act-connections">
+        <div class="act-empty">No connections</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      Retrieval Feed
+      <span class="act-live-label" id="act-live-label" style="display:none">● LIVE</span>
+    </div>
+    <div id="act-feed">
+      <div class="act-empty">Waiting for queries — activity appears here when Claude retrieves context.</div>
+    </div>
+  </div>
+</main>
+</div>
+
+<script>
+  // ── State ─────────────────────────────────────────────────────────────────
+  let currentTab    = 'overview';
+  let jobFilter     = 'all';
+  let expandedJobs  = new Set();
+  let allJobs       = [];
+  let statusData    = null;
+  let activityData  = [];
+  let prevConnCalls = {};
+  let liveLogTimer  = null;
+
+  // ── Tab switching ─────────────────────────────────────────────────────────
+  function switchTab(tab, btn) {
+    currentTab = tab;
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('panel-' + tab).classList.add('active');
+    btn.classList.add('active');
+    if (tab === 'activity') renderActivity();
+    if (tab === 'jobs')     renderJobs();
+    if (tab !== 'activity') stopLiveLog();
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function esc(s) {
+    return String(s ?? '')
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function fmtUptime(secs) {
+    if (secs == null) return '—';
+    secs = Math.floor(secs);
+    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    try { return new Date(iso).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+    catch { return iso; }
+  }
+
+  function fmtDateTime(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString([],{month:'short',day:'numeric'}) + ' ' +
+             d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    } catch { return iso; }
+  }
+
+  function fmtDuration(startIso, endIso) {
+    if (!startIso) return '—';
+    const ms = (endIso ? new Date(endIso) : new Date()) - new Date(startIso);
+    if (ms < 0) return '—';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    return `${Math.floor(s/60)}m ${s%60}s`;
+  }
+
+  function fmtAge(iso) {
+    if (!iso) return '—';
+    const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h/24)}d ago`;
+  }
+
+  // ── Polling ───────────────────────────────────────────────────────────────
+  async function pollStatus() {
+    try {
+      const res  = await fetch('/api/status');
+      const data = await res.json();
+      if (data.status === 'ok') {
+        statusData = data;
+        setHeaderPill(true);
+        if (currentTab === 'overview')  renderOverview(data);
+        if (currentTab === 'activity')  renderActivity();
+      } else {
+        statusData = null;
+        setHeaderPill(false);
+        if (currentTab === 'overview')  renderOffline();
+        if (currentTab === 'activity')  renderActivity();
+      }
+    } catch {
+      statusData = null;
+      setHeaderPill(false);
+      if (currentTab === 'overview') renderOffline();
+    }
+    document.getElementById('last-update').textContent =
+      'Updated ' + new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }
+
+  async function pollJobs() {
+    try {
+      const res = await fetch('/api/jobs');
+      const raw = await res.json();
+      allJobs = Array.isArray(raw) ? raw : (raw.jobs || []);
+      updateJobsBadge();
+      if (currentTab === 'jobs')     renderJobs();
+      if (currentTab === 'activity') renderActivity();
+    } catch {}
+  }
+
+  async function pollActivity() {
+    try {
+      const res = await fetch('/api/activity');
+      activityData = await res.json();
+      const liveLabel = document.getElementById('act-live-label');
+      if (liveLabel) liveLabel.style.display = activityData.length > 0 ? '' : 'none';
+      if (currentTab === 'activity') renderFeed();
+    } catch {}
+  }
+
+  function updateJobsBadge() {
+    const active = allJobs.filter(j => j.status === 'running' || j.status === 'pending').length;
+    const el = document.getElementById('tab-jobs-count');
+    el.textContent = allJobs.length;
+    el.className   = 'tab-count' + (active > 0 ? ' live' : '');
+    document.getElementById('live-pill').className = 'live-pill' + (active > 0 ? ' visible' : '');
+  }
+
+  // ── Header pill ───────────────────────────────────────────────────────────
+  function setHeaderPill(running) {
+    const pill  = document.getElementById('daemon-pill');
+    const dot   = document.getElementById('hdr-dot');
+    const label = document.getElementById('hdr-label');
+    pill.className  = 'daemon-pill ' + (running ? 'running' : 'stopped');
+    dot.className   = 'dot '         + (running ? 'running' : 'stopped');
+    label.textContent = running ? 'Running' : 'Stopped';
+  }
+
+  // ── Overview ──────────────────────────────────────────────────────────────
+  function renderOffline() {
+    document.getElementById('ov-dot').className   = 'dot stopped';
+    document.getElementById('ov-label').textContent = 'Stopped';
+    document.getElementById('stat-uptime').textContent = '—';
+    document.getElementById('stat-memory').textContent = '—';
+    ['ov-workspaces','ov-docs','ov-conns'].forEach(id => document.getElementById(id).textContent = '—');
+    setBtns(false);
+    document.getElementById('ws-body').innerHTML   = '<tr class="empty-row"><td colspan="6">Daemon offline</td></tr>';
+    document.getElementById('conn-body').innerHTML = '<tr class="empty-row"><td colspan="4">—</td></tr>';
+  }
+
+  function renderOverview(d) {
+    document.getElementById('ov-dot').className   = 'dot running';
+    document.getElementById('ov-label').textContent = 'Running';
+    document.getElementById('stat-uptime').textContent = fmtUptime(d.uptime_secs);
+    document.getElementById('stat-memory').textContent = d.rss_mb != null ? `${d.rss_mb} MB` : '—';
+    setBtns(true);
+
+    const workspaces = d.workspaces || [];
+    const conns      = d.active_connections || [];
+    const totalDocs  = workspaces.reduce((n, w) => n + (w.doc_count || 0), 0);
+
+    document.getElementById('ov-workspaces').textContent = workspaces.length;
+    document.getElementById('ov-docs').textContent       = totalDocs;
+    document.getElementById('ov-conns').textContent      = conns.length;
+
+    document.getElementById('ws-body').innerHTML = workspaces.length === 0
+      ? '<tr class="empty-row"><td colspan="6">No workspaces registered</td></tr>'
+      : workspaces.map(w => {
+          const watcherHtml = w.watcher_active == null ? '—'
+            : w.watcher_active
+              ? '<span class="watcher-on">&#10003; on</span>'
+              : '<span class="watcher-off">off</span>';
+          return `<tr>
+            <td><strong>${esc(w.name)}</strong></td>
+            <td><span class="badge ${esc(w.state||'idle')}">${esc(w.state||'idle')}</span></td>
+            <td>${w.doc_count ?? '—'}</td>
+            <td>${watcherHtml}</td>
+            <td class="path-cell" title="${esc(w.root_path||'')}">${esc(w.root_path||'')}</td>
+            <td style="display:flex;gap:6px;align-items:center">
+              <button class="btn-sync" onclick="syncWorkspace('${esc(w.workspace_id)}',this)" title="Trigger sync">Sync</button>
+              <button class="btn-unregister" onclick="unregisterWorkspace('${esc(w.workspace_id)}',this)" title="Unregister">&#x2715;</button>
+            </td>
+          </tr>`;
+        }).join('');
+
+    document.getElementById('conn-body').innerHTML = conns.length === 0
+      ? '<tr class="empty-row"><td colspan="4">No active connections</td></tr>'
+      : conns.map(c => `<tr>
+          <td class="mono">${esc(c.conn_id)}</td>
+          <td>${esc(c.peer)}</td>
+          <td>${c.call_count ?? 0}</td>
+          <td style="color:var(--muted)">${fmtTime(c.opened_at)}</td>
+        </tr>`).join('');
+  }
+
+  function setBtns(running) {
+    document.getElementById('btn-restart').disabled = !running;
+  }
+
+  // ── Jobs ──────────────────────────────────────────────────────────────────
+  function setJobFilter(f, btn) {
+    jobFilter = f;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderJobs();
+  }
+
+  function renderJobs() {
+    const wsSelect = document.getElementById('job-ws-filter');
+    const currentWs = wsSelect.value;
+    const wsNames = [...new Set(allJobs.map(j => j.workspaceName).filter(Boolean))].sort();
+    wsSelect.innerHTML = '<option value="all">All workspaces</option>' +
+      wsNames.map(n => `<option value="${esc(n)}"${n===currentWs?' selected':''}>${esc(n)}</option>`).join('');
+
+    const filtered = allJobs.filter(j => {
+      if (jobFilter !== 'all' && j.status !== jobFilter) return false;
+      if (wsSelect.value !== 'all' && j.workspaceName !== wsSelect.value) return false;
+      return true;
+    });
+
+    const tbody = document.getElementById('jobs-body');
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No jobs match filter</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(j => {
+      const isRunning = j.status === 'running';
+      const isExpanded = expandedJobs.has(j.id);
+      const dotHtml = isRunning ? '<span class="badge-dot"></span>' : '';
+      const typeHtml = j.type === 'sync_workspace'
+        ? '<span class="type-sync">sync</span>'
+        : '<span class="type-index">index</span>';
+      const trigHtml = j.triggeredBy === 'webhook'
+        ? '<span class="trigger-webhook">webhook</span>'
+        : '<span class="trigger-manual">manual</span>';
+
+      return `<tr class="job-row-main${isExpanded?' expanded':''}" onclick="toggleLog('${esc(j.id)}',this)">
+        <td><span class="chevron">&#9658;</span></td>
+        <td><strong>${esc(j.workspaceName||'—')}</strong></td>
+        <td>${typeHtml}</td>
+        <td><span class="badge ${esc(j.status)}">${dotHtml}${esc(j.status)}</span></td>
+        <td>${trigHtml}</td>
+        <td style="color:var(--muted);font-size:11px">${fmtDateTime(j.startedAt||j.createdAt)}</td>
+        <td style="color:var(--muted);font-size:11px">${fmtDuration(j.startedAt,j.completedAt)}</td>
+      </tr>
+      <tr class="job-log-row${isExpanded?' open':''}" id="log-row-${esc(j.id)}">
+        <td colspan="7">
+          <div class="log-container" id="log-${esc(j.id)}">
+            <span class="log-loading">Click row to load logs…</span>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function toggleLog(jobId, rowEl) {
+    const logRow     = document.getElementById('log-row-' + jobId);
+    const logContent = document.getElementById('log-' + jobId);
+    const isOpen     = logRow.classList.contains('open');
+
+    if (isOpen) {
+      logRow.classList.remove('open');
+      rowEl.classList.remove('expanded');
+      expandedJobs.delete(jobId);
+      return;
+    }
+
+    rowEl.classList.add('expanded');
+    logRow.classList.add('open');
+    expandedJobs.add(jobId);
+    logContent.innerHTML = '<span class="log-loading">Fetching logs…</span>';
+
+    try {
+      const res  = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+      const data = await res.json();
+      const logs = data.log || data.logs || [];
+      if (logs.length === 0) {
+        logContent.innerHTML = '<span class="log-loading">No log output</span>';
+      } else {
+        logContent.innerHTML = logs.map(line => {
+          const l = typeof line === 'object' ? (line.msg || JSON.stringify(line)) : String(line);
+          const cls = /error/i.test(l) ? 'err' : /warn/i.test(l) ? 'warn'
+            : /done|success|complete|finish/i.test(l) ? 'ok' : '';
+          return `<div class="log-line ${cls}">${esc(l)}</div>`;
+        }).join('');
+        logContent.scrollTop = logContent.scrollHeight;
+      }
+    } catch (e) {
+      logContent.innerHTML = `<div class="log-line err">Failed to load: ${esc(String(e))}</div>`;
+    }
+  }
+
+  // ── Activity tab ──────────────────────────────────────────────────────────
+  function renderActivity() {
+    renderCurrentJob();
+    renderConnections();
+    renderFeed();
+  }
+
+  async function renderCurrentJob() {
+    const running = allJobs.find(j => j.status === 'running');
+    const pending = allJobs.filter(j => j.status === 'pending');
+    const badge   = document.getElementById('act-job-badge');
+    const content = document.getElementById('act-job-content');
+
+    if (!running && pending.length === 0) {
+      badge.innerHTML = '';
+      content.innerHTML = '<div class="act-empty">No job running</div>';
+      stopLiveLog();
+      return;
+    }
+
+    if (running) {
+      badge.innerHTML = `<span class="badge running"><span class="badge-dot"></span>running</span>`;
+      try {
+        const res  = await fetch('/api/jobs/' + encodeURIComponent(running.id));
+        const data = await res.json();
+        paintJobLog(running, data.log || data.logs || [], data.startedAt || running.startedAt);
+      } catch {
+        content.innerHTML = '<div class="act-empty">Error loading job</div>';
+      }
+      startLiveLog(running.id);
+    } else {
+      badge.innerHTML = `<span class="badge pending">${pending.length} queued</span>`;
+      content.innerHTML = `<div class="act-empty">${pending.length} job(s) waiting to start</div>`;
+      stopLiveLog();
+    }
+  }
+
+  function paintJobLog(job, logs, startedAt) {
+    const content = document.getElementById('act-job-content');
+    const logEl   = content.querySelector('.act-log');
+    const atBottom = !logEl || (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 50);
+
+    const ws  = job.workspaceName || job.workspace_name || '—';
+    const trg = job.triggeredBy   || job.triggered_by   || '';
+    const st  = startedAt || job.startedAt || job.started_at;
+
+    const meta = `<div class="act-job-meta">
+      <strong>${esc(ws)}</strong>
+      <span class="${job.type === 'sync_workspace' ? 'type-sync' : 'type-index'}">${job.type === 'sync_workspace' ? 'sync' : 'index'}</span>
+      <span class="trigger-${esc(trg)}">${esc(trg)}</span>
+      <span style="color:var(--muted);font-size:11px">${fmtDuration(st, null)}</span>
+    </div>`;
+
+    const lines = logs.length === 0
+      ? '<span class="log-loading">No output yet…</span>'
+      : logs.slice(-40).map(l => {
+          const s = typeof l === 'object' ? (l.msg || JSON.stringify(l)) : String(l);
+          const c = /error/i.test(s) ? 'err' : /warn/i.test(s) ? 'warn'
+            : /done|success|complete|finish/i.test(s) ? 'ok' : '';
+          return `<div class="log-line ${c}">${esc(s)}</div>`;
+        }).join('');
+
+    content.innerHTML = meta + `<div class="act-log">${lines}</div>`;
+    if (atBottom) {
+      const el = content.querySelector('.act-log');
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }
+
+  function startLiveLog(jobId) {
+    if (liveLogTimer) return;
+    liveLogTimer = setInterval(async () => {
+      if (currentTab !== 'activity') return stopLiveLog();
+      const job = allJobs.find(j => j.id === jobId);
+      if (!job || job.status !== 'running') {
+        stopLiveLog();
+        renderCurrentJob();
+        return;
+      }
+      try {
+        const res  = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+        const data = await res.json();
+        paintJobLog(job, data.log || data.logs || [], data.startedAt);
+      } catch {}
+    }, 1500);
+  }
+
+  function stopLiveLog() {
+    if (liveLogTimer) { clearInterval(liveLogTimer); liveLogTimer = null; }
+  }
+
+  function renderConnections() {
+    const conns = statusData?.active_connections || [];
+    const el    = document.getElementById('act-connections');
+
+    if (conns.length === 0) {
+      el.innerHTML = '<div class="act-empty">No active connections</div>';
+      prevConnCalls = {};
+      return;
+    }
+
+    const newPrev = {};
+    el.innerHTML = conns.map(c => {
+      const prev  = prevConnCalls[c.conn_id];
+      const delta = prev != null ? c.call_count - prev : null;
+      newPrev[c.conn_id] = c.call_count;
+      const deltaHtml = delta > 0 ? `<span class="conn-delta">+${delta}</span>` : '';
+      return `<div class="conn-item">
+        <div>
+          <div class="conn-id">${esc((c.conn_id || '').slice(0, 8))}</div>
+          <div class="conn-peer">${esc(c.peer)}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="conn-calls">${c.call_count ?? 0} calls${deltaHtml}</div>
+          <div style="color:var(--muted);font-size:10px">${fmtTime(c.opened_at)}</div>
+        </div>
+      </div>`;
+    }).join('');
+    prevConnCalls = newPrev;
+  }
+
+  function renderFeed() {
+    const el = document.getElementById('act-feed');
+    if (activityData.length === 0) {
+      el.innerHTML = '<div class="act-empty">Waiting for queries — activity appears here when Claude retrieves context.</div>';
+      return;
+    }
+
+    el.innerHTML = activityData.map(ev => {
+      const notes    = ev.notes || [];
+      const query    = ev.query || '';
+      const truncQ   = query.length > 110 ? query.slice(0, 110) + '…' : query;
+
+      const noteChips = notes.map(n => {
+        const cls    = n.via ? 'expanded' : 'seed';
+        const viaStr = n.via ? ` · via ${n.via}` : '';
+        const tip    = `${n.workspace}${viaStr} · score ${n.score}`;
+        return `<div class="feed-note ${cls}" title="${esc(tip)}">
+          <span class="feed-note-title">${esc(n.title)}</span>
+          <span class="feed-note-ws">[${esc(n.workspace)}]</span>
+          <span class="feed-note-score">${n.score}</span>
+          ${n.via ? `<span class="feed-note-via">${esc(n.via)}</span>` : ''}
+        </div>`;
+      }).join('');
+
+      return `<div class="feed-entry">
+        <div class="feed-header">
+          <span class="feed-time">${fmtAge(ev.ts)}</span>
+          <span class="feed-query" title="${esc(query)}">${esc(truncQ)}</span>
+          <span class="feed-count">${ev.noteCount} notes</span>
+        </div>
+        <div class="feed-notes">${noteChips}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+  async function restartDaemon() {
+    const btn = document.getElementById('btn-restart');
+    btn.disabled = true;
+    btn.textContent = 'Restarting…';
+    document.getElementById('ov-dot').className    = 'dot pending';
+    document.getElementById('ov-label').textContent = 'Restarting…';
+    setHeaderPill(false);
+    try { await fetch('/api/daemon/restart', {method:'POST'}); } catch {}
+    // Poll until it comes back (up to 30s)
+    const deadline = Date.now() + 30000;
+    const wait = () => new Promise(r => setTimeout(r, 1000));
+    while (Date.now() < deadline) {
+      await wait();
+      try {
+        const res = await fetch('/api/status');
+        const d   = await res.json();
+        if (d.status === 'ok') { await pollStatus(); break; }
+      } catch {}
+    }
+    btn.textContent = 'Restart';
+  }
+
+  async function syncWorkspace(id, btn) {
+    btn.disabled = true; btn.textContent = '…';
+    try { await fetch(`/api/workspaces/${encodeURIComponent(id)}/sync`, {method:'POST'}); } catch {}
+    await pollJobs();
+    btn.disabled = false; btn.textContent = 'Sync';
+    if (currentTab !== 'jobs') switchTab('jobs', document.querySelector('[data-tab="jobs"]'));
+  }
+
+  async function unregisterWorkspace(id, btn) {
+    if (!confirm('Unregister this workspace?')) return;
+    btn.disabled = true; btn.textContent = '…';
+    try { await fetch(`/api/workspaces/${encodeURIComponent(id)}/unregister`, {method:'POST'}); } catch {}
+    await pollStatus();
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+  pollStatus();
+  pollJobs();
+  pollActivity();
+  setInterval(pollStatus, 3000);
+  setInterval(pollJobs, 3000);
+  setInterval(pollActivity, 2000);
+</script>
+</body>
+</html>
