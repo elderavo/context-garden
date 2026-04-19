@@ -31,7 +31,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.daemon:
-        from .daemon import main as daemon_main
+        from .server import main as daemon_main
         daemon_main(data_dir=args.data_dir)
     else:
         run_server(standalone=args.standalone)

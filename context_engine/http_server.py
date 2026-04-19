@@ -34,7 +34,7 @@ from .infra.queue.inproc_event_bus import InProcEventBus
 from .infra.queue.inproc_job_queue import InProcJobQueue
 
 if TYPE_CHECKING:
-    from .daemon import _DaemonServer
+    from .server import _DaemonServer
 
 log = logging.getLogger(__name__)
 
@@ -272,8 +272,9 @@ async def _handle_status(_req: Request) -> JSONResponse:
 
 async def _handle_daemon_stop(_req: Request) -> JSONResponse:
     assert _daemon_ref is not None
-    result = await asyncio.to_thread(_daemon_ref.handle_daemon_shutdown, {})
-    return JSONResponse(result)
+    await asyncio.to_thread(_daemon_ref.handle_daemon_shutdown, {})
+    asyncio.get_running_loop().call_later(0.25, lambda: os._exit(0))
+    return JSONResponse({"status": "stopping"})
 
 
 async def _handle_activity(_req: Request) -> JSONResponse:

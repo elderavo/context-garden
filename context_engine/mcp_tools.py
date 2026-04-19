@@ -23,7 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from .config import get_config_snapshot, write_config, get_synth_config
 
 if TYPE_CHECKING:
-    from .daemon import _DaemonServer
+    from .server import _DaemonServer
 
 log = logging.getLogger(__name__)
 
