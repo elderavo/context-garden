@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # Node is needed to run the mirror-cli subprocess
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nodejs npm git \
+    nodejs npm git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
