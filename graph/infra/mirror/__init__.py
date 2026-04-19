@@ -1,2 +1,0 @@
-"""Mirror service adapters."""
-

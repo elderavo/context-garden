@@ -1,2 +1,0 @@
-"""Application port interfaces."""
-
