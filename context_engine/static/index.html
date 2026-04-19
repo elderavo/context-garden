@@ -437,6 +437,180 @@
       margin-left: 10px;
       color: var(--green);
     }
+
+    /* ── Forms ───────────────────────────────────────────────────────────── */
+    .form-label {
+      display: block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+    .form-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: inherit;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .form-input:focus { border-color: rgba(88,166,255,0.5); }
+    .form-input::placeholder { color: var(--muted); }
+    textarea.form-input { resize: vertical; min-height: 72px; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .form-group { margin-bottom: 12px; }
+    .form-group:last-of-type { margin-bottom: 0; }
+
+    .src-toggle {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      margin-bottom: 14px;
+    }
+    .src-btn {
+      padding: 5px 16px;
+      font-size: 11px;
+      font-family: inherit;
+      font-weight: 600;
+      color: var(--muted);
+      background: var(--surface);
+      border: none;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      transition: background 0.12s, color 0.12s;
+    }
+    .src-btn:first-child { border-right: 1px solid var(--border); }
+    .src-btn.active { background: var(--raised); color: var(--text); }
+    .src-btn:active { transform: none; opacity: 1; }
+
+    .form-msg {
+      margin-top: 10px;
+      font-size: 11px;
+      min-height: 16px;
+    }
+    .form-msg.ok  { color: var(--green); }
+    .form-msg.err { color: var(--red); }
+
+    .btn-register {
+      padding: 7px 20px;
+      background: rgba(63,185,80,0.1);
+      color: var(--green);
+      border: 1px solid rgba(63,185,80,0.3);
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      letter-spacing: 0.04em;
+    }
+    .btn-register:hover:not(:disabled) { background: rgba(63,185,80,0.18); opacity: 1; }
+    .btn-register:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* ── Retrieve tab ─────────────────────────────────────────────────────── */
+    .retrieve-top {
+      display: grid;
+      grid-template-columns: 1fr 200px 100px auto;
+      gap: 10px;
+      align-items: flex-end;
+      margin-bottom: 16px;
+    }
+    .btn-run {
+      padding: 8px 22px;
+      background: rgba(88,166,255,0.1);
+      color: var(--blue);
+      border: 1px solid rgba(88,166,255,0.3);
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s, opacity 0.15s;
+      letter-spacing: 0.04em;
+    }
+    .btn-run:hover:not(:disabled) { background: rgba(88,166,255,0.18); opacity: 1; }
+    .btn-run:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .retrieve-meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .retrieve-latency { color: var(--green); font-weight: 600; }
+    .retrieve-error { color: var(--red); font-size: 12px; padding: 16px 0; }
+    .retrieve-empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 24px 0; text-align: center; }
+
+    .result-section-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 16px 0 8px;
+    }
+    .result-section-title:first-child { margin-top: 0; }
+
+    .result-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+
+    .result-card {
+      background: var(--raised);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 14px;
+      transition: border-color 0.15s;
+    }
+    .result-card.seed     { border-left: 2px solid rgba(88,166,255,0.4); }
+    .result-card.expanded { border-left: 2px solid rgba(188,140,255,0.4); }
+    .result-card:hover { border-color: rgba(125,133,144,0.4); }
+
+    .result-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .result-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .result-ws    { font-size: 10px; color: var(--muted); }
+    .result-score {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--blue);
+      flex-shrink: 0;
+    }
+    .result-card.expanded .result-score { color: var(--purple); }
+    .result-via   { font-size: 10px; color: var(--purple); margin-top: 4px; }
+
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -458,6 +632,7 @@
     Jobs <span class="tab-count" id="tab-jobs-count">—</span>
   </button>
   <button class="tab-btn" data-tab="activity" onclick="switchTab('activity',this)">Activity</button>
+  <button class="tab-btn" data-tab="retrieve" onclick="switchTab('retrieve',this)">Retrieve</button>
 </nav>
 
 <!-- ════════════════════════════ OVERVIEW ════════════════════════════════ -->
@@ -519,6 +694,61 @@
         <tr class="empty-row"><td colspan="6">Loading…</td></tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="card table-card">
+    <div class="card-title">Register Workspace</div>
+
+    <div class="src-toggle">
+      <button class="src-btn active" id="src-btn-gitlab" onclick="setSrcType('gitlab')">GitLab</button>
+      <button class="src-btn" id="src-btn-local" onclick="setSrcType('local')">Local Path</button>
+    </div>
+
+    <div id="reg-fields-gitlab">
+      <div class="form-row form-group">
+        <div>
+          <label class="form-label">Name</label>
+          <input class="form-input" id="reg-name-gitlab" type="text" placeholder="my-project" autocomplete="off">
+        </div>
+        <div>
+          <label class="form-label">Branch</label>
+          <input class="form-input" id="reg-branch" type="text" value="main">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">GitLab URL</label>
+        <input class="form-input" id="reg-gitlab-url" type="text" placeholder="https://gitlab.example.com/group/repo">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Token <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+        <input class="form-input" id="reg-token" type="password" placeholder="glpat-…">
+      </div>
+    </div>
+
+    <div id="reg-fields-local" style="display:none">
+      <div class="form-group">
+        <label class="form-label">Name</label>
+        <input class="form-input" id="reg-name-local" type="text" placeholder="my-project" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Source Directory</label>
+        <input class="form-input" id="reg-source-dir" type="text" placeholder="/absolute/path/to/source">
+      </div>
+    </div>
+
+    <div class="form-row form-group">
+      <div>
+        <label class="form-label">Languages <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+        <input class="form-input" id="reg-languages" type="text" placeholder="python, typescript">
+      </div>
+      <div>
+        <label class="form-label">Omit patterns <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+        <input class="form-input" id="reg-omit" type="text" placeholder="tests/, *.min.js">
+      </div>
+    </div>
+
+    <button class="btn-register" id="btn-register" onclick="registerWorkspace()">Register</button>
+    <div class="form-msg" id="reg-msg"></div>
   </div>
 
   <div class="card table-card">
@@ -609,6 +839,37 @@
 </main>
 </div>
 
+<!-- ════════════════════════════ RETRIEVE ════════════════════════════════ -->
+<div id="panel-retrieve" class="tab-panel">
+<main>
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-title">Test Retrieval</div>
+    <div class="retrieve-top">
+      <div>
+        <label class="form-label">Query</label>
+        <textarea class="form-input" id="ret-query" rows="3" placeholder="Enter a query to test retrieval…"></textarea>
+      </div>
+      <div>
+        <label class="form-label">Workspace</label>
+        <select class="form-input" id="ret-workspace" style="height:38px;cursor:pointer">
+          <option value="">All workspaces</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Top K</label>
+        <input class="form-input" id="ret-topk" type="number" value="8" min="1" max="50" style="height:38px">
+      </div>
+      <div>
+        <label class="form-label" style="visibility:hidden">Run</label>
+        <button class="btn-run" id="btn-run-query" onclick="runRetrieve()">Run Query</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ret-results"></div>
+</main>
+</div>
+
 <script>
   // ── State ─────────────────────────────────────────────────────────────────
   let currentTab    = 'overview';
@@ -629,6 +890,7 @@
     btn.classList.add('active');
     if (tab === 'activity') renderActivity();
     if (tab === 'jobs')     renderJobs();
+    if (tab === 'retrieve') updateRetrieveWorkspaceSelector();
     if (tab !== 'activity') stopLiveLog();
   }
 
@@ -768,6 +1030,7 @@
     const workspaces = d.workspaces || [];
     const conns      = d.active_connections || [];
     const totalDocs  = workspaces.reduce((n, w) => n + (w.doc_count || 0), 0);
+    updateRetrieveWorkspaceSelector();
 
     document.getElementById('ov-workspaces').textContent = workspaces.length;
     document.getElementById('ov-docs').textContent       = totalDocs;
@@ -1093,6 +1356,156 @@
     btn.disabled = true; btn.textContent = '…';
     try { await fetch(`/api/workspaces/${encodeURIComponent(id)}/unregister`, {method:'POST'}); } catch {}
     await pollStatus();
+  }
+
+  // ── Register Workspace ────────────────────────────────────────────────────
+  let regSrcType = 'gitlab';
+
+  function setSrcType(type) {
+    regSrcType = type;
+    document.getElementById('reg-fields-gitlab').style.display = type === 'gitlab' ? '' : 'none';
+    document.getElementById('reg-fields-local').style.display  = type === 'local'  ? '' : 'none';
+    document.getElementById('src-btn-gitlab').classList.toggle('active', type === 'gitlab');
+    document.getElementById('src-btn-local').classList.toggle('active', type === 'local');
+    document.getElementById('reg-msg').textContent = '';
+    document.getElementById('reg-msg').className = 'form-msg';
+  }
+
+  async function registerWorkspace() {
+    const msg = document.getElementById('reg-msg');
+    const btn = document.getElementById('btn-register');
+
+    const name = regSrcType === 'gitlab'
+      ? document.getElementById('reg-name-gitlab').value.trim()
+      : document.getElementById('reg-name-local').value.trim();
+
+    if (!name) { msg.textContent = 'Name is required.'; msg.className = 'form-msg err'; return; }
+
+    const langRaw = document.getElementById('reg-languages').value.trim();
+    const omitRaw = document.getElementById('reg-omit').value.trim();
+    const languages = langRaw ? langRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const omit_patterns = omitRaw ? omitRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+    let payload = { name, source_type: regSrcType, languages, omit_patterns };
+
+    if (regSrcType === 'gitlab') {
+      const url = document.getElementById('reg-gitlab-url').value.trim();
+      if (!url) { msg.textContent = 'GitLab URL is required.'; msg.className = 'form-msg err'; return; }
+      payload.gitlab_url    = url;
+      payload.gitlab_branch = document.getElementById('reg-branch').value.trim() || 'main';
+      const token = document.getElementById('reg-token').value.trim();
+      if (token) payload.gitlab_token = token;
+    } else {
+      const dir = document.getElementById('reg-source-dir').value.trim();
+      if (!dir) { msg.textContent = 'Source directory is required.'; msg.className = 'form-msg err'; return; }
+      payload.source_dir = dir;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Registering…';
+    msg.textContent = '';
+    msg.className = 'form-msg';
+
+    try {
+      const res  = await fetch('/api/workspaces', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      msg.textContent = `✓ Registered "${data.entry?.name || name}" — indexing started`;
+      msg.className = 'form-msg ok';
+      // Reset form
+      ['reg-name-gitlab','reg-name-local','reg-gitlab-url','reg-token','reg-source-dir','reg-languages','reg-omit'].forEach(id => {
+        const el = document.getElementById(id); if (el) el.value = '';
+      });
+      document.getElementById('reg-branch').value = 'main';
+      await pollStatus();
+    } catch (e) {
+      msg.textContent = '✗ ' + e.message;
+      msg.className = 'form-msg err';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Register';
+    }
+  }
+
+  // ── Retrieve ──────────────────────────────────────────────────────────────
+  function updateRetrieveWorkspaceSelector() {
+    const sel = document.getElementById('ret-workspace');
+    if (!sel) return;
+    const current = sel.value;
+    const workspaces = statusData?.workspaces || [];
+    sel.innerHTML = '<option value="">All workspaces</option>' +
+      workspaces.map(w => `<option value="${esc(w.name)}"${w.name === current ? ' selected' : ''}>${esc(w.name)}</option>`).join('');
+  }
+
+  async function runRetrieve() {
+    const query = document.getElementById('ret-query').value.trim();
+    if (!query) return;
+    const workspace = document.getElementById('ret-workspace').value;
+    const top_k     = parseInt(document.getElementById('ret-topk').value, 10) || 8;
+    const btn       = document.getElementById('btn-run-query');
+    const results   = document.getElementById('ret-results');
+
+    btn.disabled = true;
+    results.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:8px 0"><span class="spinner"></span>Running…</div>`;
+
+    const payload = { query, top_k };
+    if (workspace) payload.workspace = workspace;
+
+    const t0 = Date.now();
+    try {
+      const res  = await fetch('/api/retrieve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      const data = await res.json();
+      const ms   = Date.now() - t0;
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      renderRetrieveResults(data, ms);
+    } catch (e) {
+      results.innerHTML = `<div class="retrieve-error">✗ ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderRetrieveResults(data, ms) {
+    const results   = document.getElementById('ret-results');
+    const seeds     = data.seed_notes     || [];
+    const expanded  = data.expanded_notes || [];
+
+    if (seeds.length === 0 && expanded.length === 0) {
+      results.innerHTML = `<div class="card"><div class="retrieve-meta"><span class="retrieve-latency">${ms}ms</span></div><div class="retrieve-empty">No results found.</div></div>`;
+      return;
+    }
+
+    const noteCard = (n, cls) => {
+      const title = n.title || n.noteId?.split('/').pop()?.replace('.md','') || '—';
+      const score = typeof n.score === 'number' ? n.score.toFixed(3) : '—';
+      const via   = n.viaEdge ? `<div class="result-via">via ${esc(n.viaEdge)}</div>` : '';
+      return `<div class="result-card ${cls}">
+        <div class="result-title" title="${esc(n.noteId||'')}}">${esc(title)}</div>
+        <div class="result-meta">
+          <span class="result-ws">${esc(n.workspace||'')}</span>
+          <span class="result-score">${score}</span>
+        </div>
+        ${via}
+      </div>`;
+    };
+
+    const seedsHtml = seeds.length > 0 ? `
+      <div class="result-section-title">Seed notes (${seeds.length})</div>
+      <div class="result-grid">${seeds.map(n => noteCard(n, 'seed')).join('')}</div>
+    ` : '';
+
+    const expandedHtml = expanded.length > 0 ? `
+      <div class="result-section-title">Graph-expanded (${expanded.length})</div>
+      <div class="result-grid">${expanded.map(n => noteCard(n, 'expanded')).join('')}</div>
+    ` : '';
+
+    results.innerHTML = `<div class="card">
+      <div class="retrieve-meta">
+        <span class="retrieve-latency">${ms}ms</span>
+        <span>${seeds.length + expanded.length} notes</span>
+      </div>
+      ${seedsHtml}${expandedHtml}
+    </div>`;
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────────
