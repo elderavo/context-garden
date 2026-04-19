@@ -108,6 +108,7 @@ async def register_workspace(
 
     if gitlab_url:
         clone_dir = str((data_dir / ".context-garden" / "clones" / name).resolve())
+        Path(clone_dir).parent.mkdir(parents=True, exist_ok=True)
         webhook_secret = secrets.token_hex(32)
         token = gitlab_token or _resolve_token_from_env()
         await git_client.clone_repo(
@@ -127,7 +128,8 @@ async def register_workspace(
         }
     else:
         resolved_source_dir = str(Path(str(source_dir)).resolve())
-        _validate_source_dir(resolved_source_dir)
+        # Path existence is validated at boot time, not registration time —
+        # allows registering paths that are mounted volumes or not yet present.
         resolved_source_type = "local" if not source_type else str(source_type)
         gitlab_config = None
 
@@ -206,17 +208,9 @@ def _validate_name(name: str) -> None:
         )
 
 
-def _validate_source_dir(source_dir: str) -> None:
-    path = Path(source_dir)
-    if not path.exists():
-        raise ValueError(f"Source directory does not exist: {path}")
-    if not path.is_dir():
-        raise ValueError(f"Source path is not a directory: {path}")
-
-
 def _validate_languages(languages: list[Any]) -> None:
-    if not isinstance(languages, list) or len(languages) == 0:
-        raise ValueError("At least one language must be specified.")
+    if not isinstance(languages, list):
+        raise ValueError("languages must be a list.")
     if any(not isinstance(lang, str) or not lang for lang in languages):
         raise ValueError("Languages must be non-empty strings.")
 
