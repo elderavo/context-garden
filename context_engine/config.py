@@ -168,7 +168,7 @@ def load_config() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Module-level cache (daemon reads config once at startup; restart to reload)
+# Module-level cache — busted by write_config(), reload_config(), or SIGHUP
 # ---------------------------------------------------------------------------
 
 _cached: dict[str, Any] | None = None
@@ -184,6 +184,13 @@ def set_data_dir(data_dir: str | Path) -> None:
 
 def get_data_dir() -> Path:
     return _DATA_DIR
+
+
+def reload_config() -> None:
+    """Bust the config cache so the next get_*_config() re-reads from disk."""
+    global _cached
+    _cached = None
+    log.info("Config cache cleared — will reload from disk on next access")
 
 
 def get_embed_config() -> dict[str, Any]:

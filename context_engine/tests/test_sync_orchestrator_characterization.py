@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from context_engine.app.services.sync_orchestrator_legacy import SyncOrchestratorLegacy
+from context_engine.app.services.sync_orchestrator import SyncOrchestrator as SyncOrchestratorLegacy
 
 
 class _Repo:

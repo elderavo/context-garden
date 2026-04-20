@@ -18,10 +18,12 @@ class _FakeRequest:
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         match_info: dict[str, str] | None = None,
+        app_state: Any = None,
     ) -> None:
         self._json_body = json_body if json_body is not None else {}
         self.headers = headers if headers is not None else {}
         self.path_params = match_info if match_info is not None else {}
+        self.app = type("_App", (), {"state": app_state})()
 
     async def json(self) -> dict[str, Any]:
         return self._json_body
@@ -90,16 +92,19 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
         self.source_dir.mkdir(parents=True, exist_ok=True)
 
         self.daemon = _FakeDaemon()
-        http_server.make_http_app(self.daemon, self.data_dir)
-        http_server._mirror_service_ref = _FakeMirrorService(self.data_dir)  # type: ignore[assignment]
+        self.app = http_server.make_http_app(self.daemon, self.data_dir)
+        self.app.state.mirror_service = _FakeMirrorService(self.data_dir)
 
     async def asyncTearDown(self) -> None:
         shutil.rmtree(self.data_dir, ignore_errors=True)
 
+    def _req(self, **kwargs: Any) -> _FakeRequest:
+        return _FakeRequest(app_state=self.app.state, **kwargs)
+
     async def test_workspace_register_list_unregister_roundtrip(self) -> None:
         with patch("asyncio.create_task", new=_drop_task):
             register_resp = await http_server._handle_register_workspace(
-                _FakeRequest(
+                self._req(
                     json_body={
                         "name": "alpha-workspace",
                         "source_dir": str(self.source_dir),
@@ -115,7 +120,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(register_body["notesGenerated"], 1)
         self.assertIn("code/alpha-workspace/from-http-api.md", register_body["notePaths"])
 
-        list_resp = await http_server._handle_list_workspaces(_FakeRequest())
+        list_resp = await http_server._handle_list_workspaces(self._req())
         self.assertEqual(list_resp.status_code, 200)
         list_body = _json_response_body(list_resp)
         self.assertEqual(len(list_body), 1)
@@ -124,21 +129,21 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
         workspace_id = register_body["entry"]["id"]
         with patch("asyncio.to_thread", new=_direct_to_thread):
             unregister_resp = await http_server._handle_workspace_unregister(
-                _FakeRequest(match_info={"id": workspace_id})
+                self._req(match_info={"id": workspace_id})
             )
         self.assertEqual(unregister_resp.status_code, 200)
         unregister_body = _json_response_body(unregister_resp)
         self.assertEqual(unregister_body["status"], "unregistered")
         self.assertGreaterEqual(len(unregister_body["deletedPaths"]), 1)
 
-        post_list_resp = await http_server._handle_list_workspaces(_FakeRequest())
+        post_list_resp = await http_server._handle_list_workspaces(self._req())
         self.assertEqual(post_list_resp.status_code, 200)
         post_list_body = _json_response_body(post_list_resp)
         self.assertEqual(post_list_body, [])
 
     async def test_register_requires_source_or_gitlab(self) -> None:
         response = await http_server._handle_register_workspace(
-            _FakeRequest(json_body={"name": "missing-source", "languages": ["py"]})
+            self._req(json_body={"name": "missing-source", "languages": ["py"]})
         )
         self.assertEqual(response.status_code, 400)
         body = _json_response_body(response)
@@ -147,7 +152,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_rejects_duplicate_name(self) -> None:
         with patch("asyncio.create_task", new=_drop_task):
             first = await http_server._handle_register_workspace(
-                _FakeRequest(
+                self._req(
                     json_body={
                         "name": "dupe-workspace",
                         "source_dir": str(self.source_dir),
@@ -159,7 +164,7 @@ class HttpWorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("asyncio.create_task", new=_drop_task):
             second = await http_server._handle_register_workspace(
-                _FakeRequest(
+                self._req(
                     json_body={
                         "name": "dupe-workspace",
                         "source_dir": str(self.source_dir),

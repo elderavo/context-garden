@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock
 
-from context_engine.app.services import webhook_service_legacy
+from context_engine.app.services import webhook_service as webhook_service_legacy
 
 
 class _Job:

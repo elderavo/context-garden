@@ -12,12 +12,11 @@ from __future__ import annotations
 import asyncio
 import collections
 import datetime
-import json
 import logging
 import os
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -27,7 +26,7 @@ from starlette.routing import Mount, Route
 from .app.services import workspace_service
 from .app.services.events import WorkspaceSyncRequested
 from .infra.git.subprocess_git_client import SubprocessGitClient
-from .infra.mirror.mirror_service_legacy import MirrorServiceLegacy
+from .infra.mirror.mirror_service import NodeMirrorService
 from .infra.repo.workspace_json_repo import WorkspaceJsonRepository
 from .infra.repo.webhook_inbox_sqlite import WebhookInboxSqliteRepository
 from .infra.queue.inproc_event_bus import InProcEventBus
@@ -41,19 +40,10 @@ log = logging.getLogger(__name__)
 
 HTTP_PORT = int(os.environ.get("CG_WEBAPP_PORT", "7433"))
 
-# Populated by make_http_app()
-_daemon_ref: "_DaemonServer | None" = None
-_data_dir_ref: Path = Path.cwd()
 _static_dir: Path = Path(__file__).parent / "static"
-_job_queue_ref = InProcJobQueue()
-_workspace_repo_ref: WorkspaceJsonRepository | None = None
-_webhook_inbox_repo_ref: WebhookInboxSqliteRepository | None = None
-_event_bus_ref = InProcEventBus()
-_event_bus_ready = False
-_git_client_ref = SubprocessGitClient()
-_mirror_service_ref: MirrorServiceLegacy | None = None
 
-# ── Retrieval activity ring buffer ────────────────────────────────────────────
+# Process-level singletons: ring buffers are intentionally module-level so
+# server.py can call record_retrieval() without a request context.
 _ACTIVITY_MAX = 50
 _activity_ring: collections.deque[dict[str, Any]] = collections.deque(maxlen=_ACTIVITY_MAX)
 _RATE_MAX = 200
@@ -61,14 +51,24 @@ _rate_ring: collections.deque[dict[str, Any]] = collections.deque(maxlen=_RATE_M
 
 
 def record_retrieval(query: str, result: dict[str, Any]) -> None:
-    """Called by daemon after each query.retrieve to record which notes were hit."""
+    """Called by the daemon after each retrieve to record which notes were hit."""
     seed_notes = result.get("seed_notes", [])
     expanded_notes = result.get("expanded_notes", [])
     notes = [
-        {"title": n.get("title") or Path(n.get("noteId", "")).stem, "workspace": n.get("workspace", ""), "score": round(n.get("score", 0), 3), "via": None}
+        {
+            "title": n.get("title") or Path(n.get("noteId", "")).stem,
+            "workspace": n.get("workspace", ""),
+            "score": round(n.get("score", 0), 3),
+            "via": None,
+        }
         for n in seed_notes[:8]
     ] + [
-        {"title": n.get("title") or Path(n.get("noteId", "")).stem, "workspace": n.get("workspace", ""), "score": round(n.get("score", 0), 3), "via": n.get("viaEdge")}
+        {
+            "title": n.get("title") or Path(n.get("noteId", "")).stem,
+            "workspace": n.get("workspace", ""),
+            "score": round(n.get("score", 0), 3),
+            "via": n.get("viaEdge"),
+        }
         for n in expanded_notes[:4]
     ]
     _activity_ring.appendleft({
@@ -77,31 +77,6 @@ def record_retrieval(query: str, result: dict[str, Any]) -> None:
         "noteCount": len(seed_notes) + len(expanded_notes),
         "notes": notes,
     })
-
-
-# ── Workspace helpers ────────────────────────────────────────────────────────
-
-
-def _load_workspaces() -> list[dict[str, Any]]:
-    if _workspace_repo_ref is not None:
-        return _workspace_repo_ref.list_all()
-
-    path = _data_dir_ref / ".context-garden" / "workspaces.json"
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text("utf-8"))
-    except Exception:
-        return []
-
-
-def _save_workspaces(entries: list[dict[str, Any]]) -> None:
-    if _workspace_repo_ref is not None:
-        _workspace_repo_ref.save_all(entries)
-        return
-
-    path = _data_dir_ref / ".context-garden" / "workspaces.json"
-    path.write_text(json.dumps(entries, indent=2), "utf-8")
 
 
 # ── Route handlers ────────────────────────────────────────────────────────────
@@ -118,7 +93,7 @@ async def _handle_gitlab_webhook(req: Request) -> JSONResponse:
     from .app.services import webhook_service
 
     token = req.headers.get("X-Gitlab-Token")
-    workspaces = _load_workspaces()
+    workspaces = req.app.state.workspace_repo.list_all()
     headers = dict(req.headers)
 
     try:
@@ -130,35 +105,30 @@ async def _handle_gitlab_webhook(req: Request) -> JSONResponse:
         token=token,
         payload=payload,
         workspaces=workspaces,
-        enqueue_sync=_job_queue_ref.enqueue_sync,
+        enqueue_sync=req.app.state.job_queue.enqueue_sync,
         headers=headers,
-        event_bus=_event_bus_ref,
-        inbox_repository=_webhook_inbox_repo_ref,
+        event_bus=req.app.state.event_bus,
+        inbox_repository=req.app.state.webhook_inbox_repo,
     )
     return JSONResponse(result.body, status_code=result.status)
 
 
-async def _handle_list_workspaces(_req: Request) -> JSONResponse:
-    entries = _load_workspaces()
-    all_jobs = _job_queue_ref.list_jobs()
+async def _handle_list_workspaces(req: Request) -> JSONResponse:
+    entries = req.app.state.workspace_repo.list_all()
+    all_jobs = req.app.state.job_queue.list_jobs()
     result = workspace_service.list_workspace_summaries(entries=entries, jobs=all_jobs)
     return JSONResponse(result)
 
 
-async def _run_workspace_sync_and_reindex(workspace_name: str) -> None:
-    if _daemon_ref is None:
-        return
+async def _run_workspace_sync_and_reindex(daemon: Any, workspace_name: str) -> None:
     try:
-        await asyncio.to_thread(_daemon_ref.handle_workspaces_sync, {})
-        await asyncio.to_thread(_daemon_ref.handle_index_rebuild, {"name": workspace_name})
+        await asyncio.to_thread(daemon.handle_workspaces_sync, {})
+        await asyncio.to_thread(daemon.handle_index_rebuild, {"name": workspace_name})
     except Exception as exc:
-        log.error("Workspace post-register sync/reindex failed for %s: %s", workspace_name, exc)
+        log.error("Post-register sync/reindex failed for %s: %s", workspace_name, exc)
 
 
 async def _handle_register_workspace(req: Request) -> JSONResponse:
-    assert _workspace_repo_ref is not None
-    assert _mirror_service_ref is not None
-
     try:
         payload = await req.json()
     except Exception:
@@ -167,15 +137,17 @@ async def _handle_register_workspace(req: Request) -> JSONResponse:
     try:
         result = await workspace_service.register_workspace(
             payload=payload,
-            data_dir=_data_dir_ref,
-            workspace_repository=_workspace_repo_ref,
-            git_client=_git_client_ref,
-            mirror_service=_mirror_service_ref,
+            data_dir=req.app.state.data_dir,
+            workspace_repository=req.app.state.workspace_repo,
+            git_client=req.app.state.git_client,
+            mirror_service=req.app.state.mirror_service,
         )
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    asyncio.create_task(_run_workspace_sync_and_reindex(result.entry["name"]))
+    asyncio.create_task(
+        _run_workspace_sync_and_reindex(req.app.state.daemon, result.entry["name"])
+    )
 
     return JSONResponse(
         {
@@ -191,43 +163,40 @@ async def _handle_register_workspace(req: Request) -> JSONResponse:
 
 async def _handle_workspace_sync(req: Request) -> JSONResponse:
     workspace_id = req.path_params["id"]
-    workspaces = _load_workspaces()
-    entry = next((w for w in workspaces if w["id"] == workspace_id), None)
+    entries = req.app.state.workspace_repo.list_all()
+    entry = next((w for w in entries if w["id"] == workspace_id), None)
     if not entry:
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
     if entry.get("sourceType") != "gitlab":
         return JSONResponse({"error": "Only GitLab workspaces support sync"}, status_code=400)
 
-    job = _job_queue_ref.enqueue_sync(entry["id"], entry["name"], "manual")
+    job = req.app.state.job_queue.enqueue_sync(entry["id"], entry["name"], "manual")
     return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
 
 
 async def _handle_workspace_index(req: Request) -> JSONResponse:
     workspace_id = req.path_params["id"]
-    workspaces = _load_workspaces()
-    entry = next((w for w in workspaces if w["id"] == workspace_id), None)
+    entries = req.app.state.workspace_repo.list_all()
+    entry = next((w for w in entries if w["id"] == workspace_id), None)
     if not entry:
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
-    job = _job_queue_ref.enqueue_index(entry["id"], entry["name"], "manual")
+    job = req.app.state.job_queue.enqueue_index(entry["id"], entry["name"], "manual")
     return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
 
 
 async def _handle_workspace_unregister(req: Request) -> JSONResponse:
-    assert _daemon_ref is not None
-    assert _workspace_repo_ref is not None
-
     workspace_id = req.path_params["id"]
     result = workspace_service.unregister_workspace(
         workspace_id=workspace_id,
-        data_dir=_data_dir_ref,
-        workspace_repository=_workspace_repo_ref,
+        data_dir=req.app.state.data_dir,
+        workspace_repository=req.app.state.workspace_repo,
     )
     if not result.removed:
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
     daemon_result = await asyncio.to_thread(
-        _daemon_ref.handle_workspaces_sync, {}
+        req.app.state.daemon.handle_workspaces_sync, {}
     )
     return JSONResponse(
         {
@@ -239,7 +208,7 @@ async def _handle_workspace_unregister(req: Request) -> JSONResponse:
     )
 
 
-async def _handle_list_jobs(_req: Request) -> JSONResponse:
+async def _handle_list_jobs(req: Request) -> JSONResponse:
     return JSONResponse([
         {
             "id": j.id,
@@ -247,35 +216,45 @@ async def _handle_list_jobs(_req: Request) -> JSONResponse:
             "workspaceName": j.workspace_name,
             "triggeredBy": j.triggered_by,
             "status": j.status,
+            "error": j.error,
             "createdAt": j.created_at,
             "startedAt": j.started_at,
             "completedAt": j.completed_at,
         }
-        for j in _job_queue_ref.list_jobs()
+        for j in req.app.state.job_queue.list_jobs()
     ])
 
 
 async def _handle_get_job(req: Request) -> JSONResponse:
-    job = _job_queue_ref.get_job(req.path_params["id"])
+    job = req.app.state.job_queue.get_job(req.path_params["id"])
     if not job:
         return JSONResponse({"error": "Job not found"}, status_code=404)
     return JSONResponse(job.to_dict())
 
 
-async def _handle_status(_req: Request) -> JSONResponse:
-    assert _daemon_ref is not None
+async def _handle_status(req: Request) -> JSONResponse:
     try:
-        health = await asyncio.to_thread(_daemon_ref.handle_daemon_health, {})
+        health = await asyncio.to_thread(req.app.state.daemon.handle_daemon_health, {})
         return JSONResponse(health)
     except Exception:
         return JSONResponse({"status": "stopped"})
 
 
-async def _handle_daemon_stop(_req: Request) -> JSONResponse:
-    assert _daemon_ref is not None
-    await asyncio.to_thread(_daemon_ref.handle_daemon_shutdown, {})
-    asyncio.get_running_loop().call_later(0.25, lambda: os._exit(0))
+async def _handle_daemon_stop(req: Request) -> JSONResponse:
+    await asyncio.to_thread(req.app.state.daemon.handle_daemon_shutdown, {})
+    req.app.state.shutdown_fn()
     return JSONResponse({"status": "stopping"})
+
+
+async def _handle_daemon_restart(req: Request) -> JSONResponse:
+    req.app.state.shutdown_fn()
+    return JSONResponse({"status": "restarting"})
+
+
+async def _handle_config_reload(_req: Request) -> JSONResponse:
+    from .config import reload_config
+    reload_config()
+    return JSONResponse({"status": "reloaded"})
 
 
 async def _handle_activity(_req: Request) -> JSONResponse:
@@ -283,8 +262,6 @@ async def _handle_activity(_req: Request) -> JSONResponse:
 
 
 async def _handle_api_retrieve(req: Request) -> JSONResponse:
-    assert _daemon_ref is not None
-
     try:
         payload = await req.json()
     except Exception:
@@ -300,15 +277,13 @@ async def _handle_api_retrieve(req: Request) -> JSONResponse:
         return JSONResponse({"error": "query is required"}, status_code=400)
 
     try:
-        result = await asyncio.to_thread(_daemon_ref.handle_query_retrieve, params)
+        result = await asyncio.to_thread(req.app.state.daemon.handle_query_retrieve, params)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse(result)
 
 
 async def _handle_api_find_path(req: Request) -> JSONResponse:
-    assert _daemon_ref is not None
-
     try:
         payload = await req.json()
     except Exception:
@@ -328,7 +303,7 @@ async def _handle_api_find_path(req: Request) -> JSONResponse:
         "workspace_id": payload.get("workspace_id"),
     }
     try:
-        result = await asyncio.to_thread(_daemon_ref.handle_query_find_path, params)
+        result = await asyncio.to_thread(req.app.state.daemon.handle_query_find_path, params)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse(result)
@@ -351,21 +326,18 @@ async def _handle_api_rate(req: Request) -> JSONResponse:
     if not isinstance(score, int) or score < 1 or score > 5:
         return JSONResponse({"error": "score must be an integer in range 1-5"}, status_code=400)
 
-    item = {
+    _rate_ring.appendleft({
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "retrieval_id": retrieval_id,
         "query": query,
         "score": score,
         "helpful": helpful,
         "missing": missing,
-    }
-    _rate_ring.appendleft(item)
+    })
     return JSONResponse({"status": "recorded"})
 
 
 async def _handle_api_note(req: Request) -> JSONResponse:
-    assert _daemon_ref is not None
-
     relative_path = req.query_params.get("relative_path", "").strip()
     if not relative_path:
         return JSONResponse({"error": "relative_path is required"}, status_code=400)
@@ -376,15 +348,13 @@ async def _handle_api_note(req: Request) -> JSONResponse:
         params["workspace_id"] = workspace_id
 
     try:
-        result = await asyncio.to_thread(_daemon_ref.handle_query_get_note_content, params)
+        result = await asyncio.to_thread(req.app.state.daemon.handle_query_get_note_content, params)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse(result)
 
 
 async def _handle_api_stats(req: Request) -> JSONResponse:
-    assert _daemon_ref is not None
-
     params: dict[str, Any] = {}
     workspace = req.query_params.get("workspace", "").strip()
     workspace_id = req.query_params.get("workspace_id", "").strip()
@@ -394,42 +364,40 @@ async def _handle_api_stats(req: Request) -> JSONResponse:
         params["workspace_id"] = workspace_id
 
     try:
-        result = await asyncio.to_thread(_daemon_ref.handle_query_stats, params)
+        result = await asyncio.to_thread(req.app.state.daemon.handle_query_stats, params)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse(result)
 
 
-async def _handle_daemon_restart(_req: Request) -> JSONResponse:
-    asyncio.get_running_loop().call_later(0.25, lambda: os._exit(0))
-    return JSONResponse({"status": "restarting"})
-
-
-async def _on_workspace_sync_requested(event: WorkspaceSyncRequested) -> None:
-    job = _job_queue_ref.enqueue_sync(event.workspace_id, event.workspace_name, "webhook")
-    event.job_id = job.id
-
-
 # ── App factory ───────────────────────────────────────────────────────────────
 
 
-def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> Starlette:
-    global _daemon_ref, _data_dir_ref, _workspace_repo_ref, _webhook_inbox_repo_ref, _event_bus_ready
-    global _mirror_service_ref
-    _daemon_ref = daemon
-    _data_dir_ref = data_dir
-    _workspace_repo_ref = WorkspaceJsonRepository(data_dir)
-    _webhook_inbox_repo_ref = WebhookInboxSqliteRepository(data_dir)
-    _node_bin = shutil.which("node") or "node"
-    _mirror_cli = resolve_mirror_cli(data_dir=data_dir)
-    _mirror_service_ref = MirrorServiceLegacy(
+def make_http_app(
+    daemon: "_DaemonServer",
+    data_dir: Path,
+    shutdown_fn: "Callable[[], None] | None" = None,
+) -> Starlette:
+    job_queue = InProcJobQueue()
+    event_bus = InProcEventBus()
+    workspace_repo = WorkspaceJsonRepository(data_dir)
+    webhook_inbox_repo = WebhookInboxSqliteRepository(data_dir)
+    git_client = SubprocessGitClient()
+    mirror_cli = resolve_mirror_cli(data_dir=data_dir)
+    mirror_service = NodeMirrorService(
         data_dir=data_dir,
-        node_bin=_node_bin,
-        mirror_cli=_mirror_cli,
+        node_bin=shutil.which("node") or "node",
+        mirror_cli=mirror_cli,
     )
-    if not _event_bus_ready:
-        _event_bus_ref.subscribe(WorkspaceSyncRequested, _on_workspace_sync_requested)
-        _event_bus_ready = True
+
+    async def _on_workspace_sync_requested(event: WorkspaceSyncRequested) -> None:
+        job = job_queue.enqueue_sync(event.workspace_id, event.workspace_name, "webhook")
+        event.job_id = job.id
+
+    event_bus.subscribe(WorkspaceSyncRequested, _on_workspace_sync_requested)
+
+    def _noop_shutdown() -> None:
+        log.warning("Shutdown requested but no shutdown_fn configured")
 
     routes = [
         Route("/", _handle_index, methods=["GET"]),
@@ -457,10 +425,12 @@ def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> Starlette:
 
         Route("/status", _handle_status, methods=["GET"]),
         Route("/api/status", _handle_status, methods=["GET"]),
+        Route("/api/health", _handle_status, methods=["GET"]),
 
         Route("/daemon/stop", _handle_daemon_stop, methods=["POST"]),
         Route("/api/daemon/stop", _handle_daemon_stop, methods=["POST"]),
         Route("/api/daemon/restart", _handle_daemon_restart, methods=["POST"]),
+        Route("/api/config/reload", _handle_config_reload, methods=["POST"]),
     ]
 
     try:
@@ -471,11 +441,22 @@ def make_http_app(daemon: "_DaemonServer", data_dir: Path) -> Starlette:
         mcp_server = create_mcp_server(
             daemon=daemon,
             data_dir=data_dir,
-            job_queue=_job_queue_ref,
-            workspace_repo=_workspace_repo_ref,
-            mirror_service=_mirror_service_ref,
+            job_queue=job_queue,
+            workspace_repo=workspace_repo,
+            mirror_service=mirror_service,
             activity_ring=_activity_ring,
+            rate_ring=_rate_ring,
         )
         routes.append(Mount("/mcp", app=mcp_server.streamable_http_app()))
 
-    return Starlette(routes=routes)
+    app = Starlette(routes=routes)
+    app.state.daemon = daemon
+    app.state.data_dir = data_dir
+    app.state.workspace_repo = workspace_repo
+    app.state.webhook_inbox_repo = webhook_inbox_repo
+    app.state.job_queue = job_queue
+    app.state.event_bus = event_bus
+    app.state.git_client = git_client
+    app.state.mirror_service = mirror_service
+    app.state.shutdown_fn = shutdown_fn or _noop_shutdown
+    return app

@@ -41,6 +41,7 @@ class Job:
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     log: list[str] = field(default_factory=list)
+    error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +51,7 @@ class Job:
             "workspaceName": self.workspace_name,
             "triggeredBy": self.triggered_by,
             "status": self.status,
+            "error": self.error,
             "createdAt": self.created_at,
             "startedAt": self.started_at,
             "completedAt": self.completed_at,
@@ -222,6 +224,7 @@ async def _run_workspace_worker(workspace_id: str) -> None:
                 job.status = "done"
             except Exception as exc:
                 job.status = "failed"
+                job.error = str(exc)
                 _log(job, f"Error: {exc}")
                 log.error("Job %s failed: %s", job.id, exc)
             finally:

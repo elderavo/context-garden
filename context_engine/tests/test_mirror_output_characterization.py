@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from context_engine.infra.mirror.mirror_service_legacy import MirrorServiceLegacy
+from context_engine.infra.mirror.mirror_service import NodeMirrorService as MirrorServiceLegacy
 
 
 class _FakeProc:
@@ -33,7 +33,7 @@ class MirrorOutputCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         fake_proc = _FakeProc(stdout=json.dumps(mirror_result).encode("utf-8"))
         create_proc = AsyncMock(return_value=fake_proc)
 
-        with patch("context_engine.infra.mirror.mirror_service_legacy.asyncio.create_subprocess_exec", new=create_proc):
+        with patch("context_engine.infra.mirror.mirror_service.asyncio.create_subprocess_exec", new=create_proc):
             result = await service.run(
                 workspace_entry={"name": "alpha", "languages": ["py"]},
                 gitlab_config={

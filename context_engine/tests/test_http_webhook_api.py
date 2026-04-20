@@ -13,9 +13,16 @@ from context_engine.core import jobs
 
 
 class _FakeRequest:
-    def __init__(self, *, json_body: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        json_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        app_state: Any = None,
+    ) -> None:
         self._json_body = json_body if json_body is not None else {}
         self.headers = headers if headers is not None else {}
+        self.app = type("_App", (), {"state": app_state})()
 
     async def json(self) -> dict[str, Any]:
         return self._json_body
@@ -61,9 +68,8 @@ class HttpWebhookApiTests(unittest.IsolatedAsyncioTestCase):
         jobs._workspace_worker_tasks.clear()
         jobs._sync_orchestrator = _NoopOrchestrator()
 
-        http_server.make_http_app(_FakeDaemon(), self.data_dir)
-        assert http_server._workspace_repo_ref is not None
-        http_server._workspace_repo_ref.save_all(
+        self.app = http_server.make_http_app(_FakeDaemon(), self.data_dir)
+        self.app.state.workspace_repo.save_all(
             [
                 {
                     "id": "ws-1",
@@ -88,9 +94,12 @@ class HttpWebhookApiTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*list(jobs._workspace_worker_tasks.values()))
         shutil.rmtree(self.data_dir, ignore_errors=True)
 
+    def _req(self, **kwargs: Any) -> _FakeRequest:
+        return _FakeRequest(app_state=self.app.state, **kwargs)
+
     async def test_webhook_event_enqueues_job_and_returns_job_id(self) -> None:
         response = await http_server._handle_gitlab_webhook(
-            _FakeRequest(
+            self._req(
                 headers={
                     "X-Gitlab-Token": "secret-token",
                     "X-Gitlab-Event-UUID": "delivery-1",
@@ -113,7 +122,7 @@ class HttpWebhookApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_delivery_is_ignored_without_second_job(self) -> None:
         first = await http_server._handle_gitlab_webhook(
-            _FakeRequest(
+            self._req(
                 headers={
                     "X-Gitlab-Token": "secret-token",
                     "X-Gitlab-Event-UUID": "delivery-2",
@@ -123,7 +132,7 @@ class HttpWebhookApiTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         second = await http_server._handle_gitlab_webhook(
-            _FakeRequest(
+            self._req(
                 headers={
                     "X-Gitlab-Token": "secret-token",
                     "X-Gitlab-Event-UUID": "delivery-2",

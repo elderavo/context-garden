@@ -29,9 +29,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MAX_CHARS = 15_000
 
-# Shared rate ring — written by this module, read by http_server for /api/activity
-rate_ring: collections.deque[dict[str, Any]] = collections.deque(maxlen=200)
-
 
 def create_mcp_server(
     daemon: "_DaemonServer",
@@ -40,6 +37,7 @@ def create_mcp_server(
     workspace_repo: Any,
     mirror_service: Any,
     activity_ring: collections.deque,
+    rate_ring: collections.deque,
 ) -> FastMCP:
     """Build and return the FastMCP server wired to the live daemon."""
 

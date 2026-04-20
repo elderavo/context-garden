@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 
-class MirrorServiceLegacy:
-    """Legacy mirror adapter that shells out to the TypeScript mirror CLI."""
+class NodeMirrorService:
+    """Mirror adapter that shells out to the TypeScript mirror CLI."""
 
     def __init__(self, *, data_dir: Path, node_bin: str, mirror_cli: str) -> None:
         self._data_dir = data_dir
@@ -51,4 +51,3 @@ class MirrorServiceLegacy:
             raise RuntimeError(f"Mirror CLI error: {result['error']}")
 
         return result
-

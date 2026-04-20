@@ -14,3 +14,9 @@ services:
     extra_hosts:
       # Lets the container reach host-network services on Linux
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7433/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

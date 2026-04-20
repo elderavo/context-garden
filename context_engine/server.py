@@ -909,7 +909,15 @@ async def _run_server() -> None:
     import uvicorn
     from .http_server import make_http_app, HTTP_PORT
 
-    starlette_app = make_http_app(_server, DATA_DIR)
+    # Use a holder so the shutdown fn can close over the server handle
+    # even though make_http_app is called before the server is created.
+    _uv_ref: list[uvicorn.Server] = []
+
+    def _request_shutdown() -> None:
+        if _uv_ref:
+            _uv_ref[0].should_exit = True
+
+    starlette_app = make_http_app(_server, DATA_DIR, shutdown_fn=_request_shutdown)
     uv_config = uvicorn.Config(
         starlette_app,
         host="0.0.0.0",
@@ -918,6 +926,20 @@ async def _run_server() -> None:
         log_level="warning",
     )
     uv_server = uvicorn.Server(uv_config)
+    _uv_ref.append(uv_server)
+
+    # SIGHUP reloads config without restart (Linux/container only)
+    try:
+        import signal as _signal
+        from .config import reload_config as _reload_config
+
+        def _on_sighup() -> None:
+            _reload_config()
+            log.info("Config reloaded via SIGHUP")
+
+        asyncio.get_event_loop().add_signal_handler(_signal.SIGHUP, _on_sighup)
+    except (AttributeError, NotImplementedError, OSError):
+        pass  # SIGHUP unavailable on Windows
 
     asyncio.ensure_future(_periodic_metrics())
     asyncio.create_task(_boot_workspaces_in_background())
