@@ -15,6 +15,7 @@ import datetime
 import logging
 import os
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -433,6 +434,7 @@ def make_http_app(
         Route("/api/config/reload", _handle_config_reload, methods=["POST"]),
     ]
 
+    mcp_session_manager = None
     try:
         from .mcp_tools import create_mcp_server
     except ModuleNotFoundError as exc:
@@ -447,9 +449,18 @@ def make_http_app(
             activity_ring=_activity_ring,
             rate_ring=_rate_ring,
         )
+        mcp_session_manager = mcp_server.session_manager
         routes.append(Mount("/mcp", app=mcp_server.streamable_http_app()))
 
-    app = Starlette(routes=routes)
+    @asynccontextmanager
+    async def lifespan(_app: Starlette):
+        if mcp_session_manager is not None:
+            async with mcp_session_manager.run():
+                yield
+        else:
+            yield
+
+    app = Starlette(routes=routes, lifespan=lifespan)
     app.state.daemon = daemon
     app.state.data_dir = data_dir
     app.state.workspace_repo = workspace_repo
