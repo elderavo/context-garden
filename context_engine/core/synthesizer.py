@@ -230,7 +230,7 @@ def _llm_chat(
     timeout: float = DEFAULT_TIMEOUT,
 ) -> str:
     """Call configured LLM provider and return the response content string."""
-    provider = synth_config.get("provider", "ollama")
+    provider = synth_config.get("provider", "ollama").lower()
     model = synth_config.get("model", "")
     host = synth_config.get("host", "").rstrip("/")
     api_key = synth_config.get("api_key", "")

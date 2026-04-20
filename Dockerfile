@@ -31,6 +31,7 @@ COPY --from=ts-build /build/node_modules ./node_modules
 
 # Application code (changes most often — last layer)
 COPY context_engine ./context_engine
+COPY src/data ./src/data
 
 VOLUME ["/data"]
 ENV CG_WEBAPP_PORT=7433
