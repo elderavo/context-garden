@@ -683,40 +683,26 @@ class _DaemonServer:
         top_k = params.get("top_k")
         query = params["query"]
 
-        if not params.get("workspace_id"):
+        # Resolve workspace name → workspace_id if needed
+        resolved_params = dict(params)
+        if not resolved_params.get("workspace_id") and workspace_filter:
             with self._lock:
-                runtimes = list(self._runtimes.values())
-            if len(runtimes) > 1:
-                all_seeds: list[dict] = []
-                all_expanded: list[dict] = []
-                for rt in runtimes:
-                    with rt._engine_lock:
-                        res = rt.engine.retrieve(query=query, top_k=top_k, workspace=workspace_filter)
-                    all_seeds.extend(res.get("seed_notes", []))
-                    all_expanded.extend(res.get("expanded_notes", []))
+                for rt in self._runtimes.values():
+                    if rt.record.name == workspace_filter:
+                        resolved_params["workspace_id"] = rt.record.workspace_id
+                        break
 
-                def _dedup_by_score(notes: list[dict]) -> list[dict]:
-                    seen: dict[str, dict] = {}
-                    for n in notes:
-                        nid = n.get("noteId", "")
-                        if nid not in seen or n.get("score", 0) > seen[nid].get("score", 0):
-                            seen[nid] = n
-                    return sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)
-
-                merged = {
-                    "seed_notes": _dedup_by_score(all_seeds),
-                    "expanded_notes": _dedup_by_score(all_expanded),
-                }
-                try:
-                    from . import http_server as _hs
-                    _hs.record_retrieval(query, merged)
-                except Exception:
-                    pass
-                return merged
-
-        rt = self._get_runtime(params, wait_secs=RUNTIME_READY_TIMEOUT_SECS)
+        rt = self._get_runtime(resolved_params, wait_secs=RUNTIME_READY_TIMEOUT_SECS)
         if not rt:
+            with self._lock:
+                names = [r.record.name for r in self._runtimes.values()]
+            if len(names) > 1:
+                raise RuntimeError(
+                    f"Multiple workspaces registered ({', '.join(names)}). "
+                    f"Specify a workspace name in your query."
+                )
             raise RuntimeError("Workspace is still initializing; try again shortly.")
+
         with rt._engine_lock:
             result = rt.engine.retrieve(query=query, top_k=top_k, workspace=workspace_filter)
         try:
