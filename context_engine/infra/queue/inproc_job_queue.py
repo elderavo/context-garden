@@ -24,6 +24,14 @@ class InProcJobQueue:
     ):
         return jobs.enqueue_index(workspace_id, workspace_name, triggered_by)
 
+    def enqueue_rebuild(
+        self,
+        workspace_id: str,
+        workspace_name: str,
+        triggered_by: Literal["webhook", "manual"] = "manual",
+    ):
+        return jobs.enqueue_rebuild(workspace_id, workspace_name, triggered_by)
+
     def list_jobs(self):
         return jobs.list_jobs()
 
