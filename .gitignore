@@ -32,3 +32,18 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Test temp dirs
+.tmp-tests/
+tmp-tests-*/
+ws-test-*/
+ws-tests-*/
+
+# Docker data volume
+data/
+
+# Playwright MCP session files
+.playwright-mcp/
+
+# Pytest
+.pytest_cache/

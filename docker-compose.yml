@@ -1,0 +1,22 @@
+services:
+  context-garden:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "7433:7433"
+    volumes:
+      - ./data:/data
+      - /opt/context-garden/ssh/id_ed25519:/run/secrets/git_ssh_key:ro
+      - /opt/context-garden/ssh/known_hosts:/root/.ssh/known_hosts:ro
+    environment:
+      CG_OLLAMA_HOST: "${CG_OLLAMA_HOST:-http://localhost:11434}"
+      CG_WEBAPP_PORT: "7433"
+      GIT_SSH_COMMAND: "ssh -F /dev/null -i /run/secrets/git_ssh_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts -p 2222"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7433/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
