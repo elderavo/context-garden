@@ -62,8 +62,14 @@ interface ImportInfo {
 
 interface ExportInfo {
   name: string;
-  kind: "function" | "class" | "const" | "type" | "interface" | "enum" | "reexport";
+  kind: "function" | "class" | "const" | "type" | "interface" | "enum" | "reexport" | "route" | "fixture";
   signature?: string;
+  decorators?: string[];   // bare decorator names, e.g. ["router.get", "abstractmethod"]
+  routeMethod?: string;    // HTTP verb for routes: "GET", "POST", etc.
+  routePath?: string;      // URL path for routes: "/api/users/{id}"
+  baseClasses?: string[];  // raw base class names from class(...) declaration
+  isAbstract?: boolean;    // has @abstractmethod or inherits from ABC/Protocol
+  isDataclass?: boolean;   // decorated with @dataclass
 }
 
 interface FunctionInfo {
@@ -75,6 +81,7 @@ interface FunctionInfo {
   className?: string;
   bodyStart: number;       // char offset — used for per-function call attribution
   bodyEnd: number;
+  decorators?: string[];
 }
 
 interface ParsedFunction extends FunctionInfo {
@@ -274,8 +281,9 @@ function extractDefinitions(source: string): {
       )
     : null;
 
-  // Pending decorator names (e.g. "staticmethod", "dataclass") collected from @ lines
+  // Pending decorators — bare name AND full line (for route path extraction)
   let pendingDecorators: string[] = [];
+  let pendingDecoratorLines: string[] = [];
 
   // Current class context — single-level tracking
   let currentClass: { name: string; indent: number } | null = null;
@@ -306,10 +314,11 @@ function extractDefinitions(source: string): {
       currentClass = null;
     }
 
-    // Decorator line — capture the bare name (no args, no @)
+    // Decorator line — capture bare name and full line
     if (trimmed.startsWith("@")) {
       const decoratorName = trimmed.slice(1).split("(")[0].trim();
       pendingDecorators.push(decoratorName);
+      pendingDecoratorLines.push(trimmed);
       charOffset += lineLen + 1;
       continue;
     }
@@ -320,13 +329,31 @@ function extractDefinitions(source: string): {
       const name = classMatch[1];
       const baseList = classMatch[2]?.trim();
       const classSignature = baseList ? `class ${name}(${baseList})` : `class ${name}`;
+      const baseClasses = baseList
+        ? baseList.split(",").map((b) => b.trim()).filter(Boolean)
+        : [];
+      const isDataclass = pendingDecorators.some((d) =>
+        d === "dataclass" || d.endsWith(".dataclass")
+      );
+      const isAbstract = baseClasses.some((b) =>
+        b === "ABC" || b === "abc.ABC" || b === "Protocol" || b === "typing.Protocol"
+      );
       if (indent === 0) {
         currentClass = { name, indent: 0 };
         if (!explicitExports || explicitExports.has(name)) {
-          exports.push({ name, kind: "class", signature: classSignature });
+          exports.push({
+            name,
+            kind: "class",
+            signature: classSignature,
+            decorators: pendingDecorators.length ? [...pendingDecorators] : undefined,
+            baseClasses: baseClasses.length ? baseClasses : undefined,
+            isAbstract: isAbstract || undefined,
+            isDataclass: isDataclass || undefined,
+          });
         }
       }
       pendingDecorators = [];
+      pendingDecoratorLines = [];
       charOffset += lineLen + 1;
       continue;
     }
@@ -337,7 +364,10 @@ function extractDefinitions(source: string): {
       const isAsync = !!(defMatch[1]?.trim());
       const name = defMatch[2];
       const isStatic = pendingDecorators.includes("staticmethod");
+      const capturedDecorators = [...pendingDecorators];
+      const capturedDecoratorLines = [...pendingDecoratorLines];
       pendingDecorators = [];
+      pendingDecoratorLines = [];
 
       // Collect full signature — may span multiple lines if params are multiline
       // Count unbalanced open parens to know when signature ends
@@ -393,11 +423,54 @@ function extractDefinitions(source: string): {
         bodyStart: defLineStart,
         bodyEnd: defLineStart + lineLen, // refined after the loop
         indent,
+        decorators: capturedDecorators.length ? capturedDecorators : undefined,
       });
 
       if (isExported) {
         if (!explicitExports || explicitExports.has(name)) {
-          exports.push({ name, kind: "function", signature: sig });
+          // Derive kind from decorators
+          const HTTP_VERBS = ["get", "post", "put", "patch", "delete", "head", "options"];
+          let kind: ExportInfo["kind"] = "function";
+          let routeMethod: string | undefined;
+          let routePath: string | undefined;
+          const isAbstractMethod = capturedDecorators.includes("abstractmethod") ||
+            capturedDecorators.includes("abc.abstractmethod");
+
+          for (const decLine of capturedDecoratorLines) {
+            // Match @router.get("/path") or @app.route("/path", methods=["GET"])
+            const verbMatch = decLine.match(/@[\w.]+\.(get|post|put|patch|delete|head|options)\s*\(\s*["']([^"']+)["']/i);
+            if (verbMatch) {
+              kind = "route";
+              routeMethod = verbMatch[1].toUpperCase();
+              routePath = verbMatch[2];
+              break;
+            }
+            // @app.route("/path") style
+            const routeMatch = decLine.match(/@[\w.]*route\s*\(\s*["']([^"']+)["']/i);
+            if (routeMatch) {
+              kind = "route";
+              routePath = routeMatch[1];
+              // extract methods=["GET"] if present
+              const methodsMatch = decLine.match(/methods\s*=\s*\[["'](\w+)["']/i);
+              routeMethod = methodsMatch ? methodsMatch[1].toUpperCase() : "GET";
+              break;
+            }
+          }
+
+          // @pytest.fixture
+          if (kind === "function" && capturedDecorators.some((d) => d === "fixture" || d.endsWith(".fixture"))) {
+            kind = "fixture";
+          }
+
+          exports.push({
+            name,
+            kind,
+            signature: sig,
+            decorators: capturedDecorators.length ? capturedDecorators : undefined,
+            routeMethod,
+            routePath,
+            isAbstract: isAbstractMethod || undefined,
+          });
         }
       }
 
@@ -405,6 +478,7 @@ function extractDefinitions(source: string): {
     }
 
     pendingDecorators = [];
+    pendingDecoratorLines = [];
     charOffset += lineLen + 1;
   }
 
@@ -580,12 +654,24 @@ function generateSymbolNote(
   today: string,
   prefix = MIRROR_PREFIX,
   workspace?: string,
+  allFiles?: FileData[],
+  publicApiMap?: Map<string, Set<string>>,
 ): string {
   const lines: string[] = [];
   const dirRel = path.posix.dirname(file.relativePath);
   const stem = mirrorStem(file.relativePath);
   const parentFileLink = dirRel === "." ? `${prefix}/${stem}` : `${prefix}/${dirRel}/${stem}`;
   const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
+
+  const isPublicApi = publicApiMap?.get(file.relativePath)?.has(exp.name) ?? false;
+  const fmExtra: string[] = [];
+  if (isPublicApi) fmExtra.push(`publicApi: true`);
+  if (exp.decorators?.length) fmExtra.push(`decorators: [${exp.decorators.join(", ")}]`);
+  if (exp.routeMethod) fmExtra.push(`routeMethod: ${exp.routeMethod}`);
+  if (exp.routePath)   fmExtra.push(`routePath: "${exp.routePath}"`);
+  if (exp.isAbstract)  fmExtra.push(`abstract: true`);
+  if (exp.isDataclass) fmExtra.push(`dataclass: true`);
+  if (exp.baseClasses?.length) fmExtra.push(`baseClasses: [${exp.baseClasses.join(", ")}]`);
 
   lines.push(
     "---",
@@ -596,6 +682,7 @@ function generateSymbolNote(
     `parentModule: ${parentModuleLink}`,
     `symbolKind: ${exp.kind}`,
     "language: py",
+    ...fmExtra,
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
@@ -603,8 +690,21 @@ function generateSymbolNote(
     "",
   );
 
+  // Build header line: route gets method+path, others get kind
+  let kindDisplay = `\`${exp.kind}\``;
+  if (exp.kind === "route" && exp.routeMethod && exp.routePath) {
+    kindDisplay = `\`${exp.kind}\` — \`${exp.routeMethod} ${exp.routePath}\``;
+  } else if (exp.isDataclass) {
+    kindDisplay = `\`dataclass\``;
+  } else if (exp.isAbstract) {
+    kindDisplay = `\`${exp.kind}\` *(abstract)*`;
+  }
+
   lines.push(`# ${exp.name}`, "");
-  lines.push(`**Kind:** \`${exp.kind}\`  `);
+  lines.push(`**Kind:** ${kindDisplay}  `);
+  if (exp.decorators?.length) {
+    lines.push(`**Decorators:** ${exp.decorators.map((d) => `\`@${d}\``).join(", ")}  `);
+  }
   lines.push(`**File:** [[${parentFileLink}]]`, "");
 
   if (exp.signature) {
@@ -612,6 +712,23 @@ function generateSymbolNote(
     lines.push("```py");
     lines.push(exp.signature);
     lines.push("```", "");
+  }
+
+  // Base class links (class symbols only)
+  if (exp.baseClasses?.length) {
+    lines.push("## Inherits", "");
+    for (const base of exp.baseClasses) {
+      // Try to resolve to an in-repo symbol
+      const resolvedBase = allFiles
+        ? allFiles.find((f) => f.exports.some((e) => e.name === base))
+        : null;
+      if (resolvedBase) {
+        lines.push(`- [[${toSymbolWikiLink(resolvedBase.relativePath, base, prefix)}|${base}]]`);
+      } else {
+        lines.push(`- \`${base}\``);
+      }
+    }
+    lines.push("");
   }
 
   const seenTargets = new Set<string>();
@@ -624,7 +741,7 @@ function generateSymbolNote(
     }
   };
 
-  if (exp.kind === "function") {
+  if (exp.kind === "function" || exp.kind === "route" || exp.kind === "fixture") {
     const fn = file.functions.find(
       (f) => !f.isMethod && f.name === exp.name && f.isExported,
     );
@@ -652,6 +769,32 @@ function generateSymbolNote(
     if (classCalls.length) {
       lines.push("## Calls Into", "");
       appendCalls(classCalls);
+      lines.push("");
+    }
+  }
+
+  // Type annotation cross-refs: extract type names from signature, link in-repo ones
+  if (allFiles && exp.signature) {
+    const typeTokens = new Set<string>();
+    // Match: "param: TypeName" and "-> ReturnType", including Optional[X], list[X], etc.
+    const typeRe = /:\s*([A-Z][A-Za-z0-9_]*)(?:\[[^\]]*\])?|\->\s*([A-Z][A-Za-z0-9_]*)/g;
+    let tm: RegExpExecArray | null;
+    while ((tm = typeRe.exec(exp.signature)) !== null) {
+      const t = tm[1] || tm[2];
+      if (t) typeTokens.add(t);
+    }
+    const typeLinks: string[] = [];
+    for (const typeName of typeTokens) {
+      const defFile = allFiles.find((f) =>
+        f.exports.some((e) => e.name === typeName && (e.kind === "class" || e.kind === "type"))
+      );
+      if (defFile && defFile.relativePath !== file.relativePath) {
+        typeLinks.push(`[[${toSymbolWikiLink(defFile.relativePath, typeName, prefix)}|${typeName}]]`);
+      }
+    }
+    if (typeLinks.length) {
+      lines.push("## Type References", "");
+      for (const link of typeLinks) lines.push(`- ${link}`);
       lines.push("");
     }
   }
@@ -1004,6 +1147,32 @@ export async function runMirrorPy(
 
   buildCallGraph(files);
 
+  // Build public API set: symbol names re-exported through any __init__.py
+  // {relPath of defining file} → Set<symbol name>
+  const publicApiMap = new Map<string, Set<string>>();
+  for (const initFile of files) {
+    if (!initFile.relativePath.endsWith("__init__.py")) continue;
+    const pkgDir = path.posix.dirname(initFile.relativePath);
+    for (const imp of initFile.imports) {
+      if (!imp.isInternal) continue;
+      const resolved = resolveInternal(initFile.relativePath, imp.specifier, files);
+      if (!resolved) continue;
+      // "from .models import Foo, Bar" → mark Foo, Bar as public in resolved file
+      for (const binding of imp.bindings) {
+        if (binding === "*") {
+          // star export: all exports of the resolved file become public
+          for (const exp of resolved.exports) {
+            if (!publicApiMap.has(resolved.relativePath)) publicApiMap.set(resolved.relativePath, new Set());
+            publicApiMap.get(resolved.relativePath)!.add(exp.name);
+          }
+        } else {
+          if (!publicApiMap.has(resolved.relativePath)) publicApiMap.set(resolved.relativePath, new Set());
+          publicApiMap.get(resolved.relativePath)!.add(binding);
+        }
+      }
+    }
+  }
+
   let written = 0;
   let skipped = 0;
   const prefix = opts.wikilinkPrefix ?? MIRROR_PREFIX;
@@ -1035,7 +1204,7 @@ export async function runMirrorPy(
       for (const exp of definedSymbols) {
         const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, exp.name);
         if (!fs.existsSync(symPath)) {
-          const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace);
+          const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace, files, publicApiMap);
           const symPreserved = extractSummarySection(symPath);
           const symFinal = symPreserved ? symMarkdown.trimEnd() + "\n\n" + symPreserved + "\n" : symMarkdown;
           fs.mkdirSync(path.dirname(symPath), { recursive: true });
@@ -1055,7 +1224,7 @@ export async function runMirrorPy(
 
     for (const exp of definedSymbols) {
       const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, exp.name);
-      const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace);
+      const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace, files, publicApiMap);
       const symPreserved = extractSummarySection(symPath);
       const symFinal = symPreserved ? symMarkdown.trimEnd() + "\n\n" + symPreserved + "\n" : symMarkdown;
       fs.mkdirSync(path.dirname(symPath), { recursive: true });
