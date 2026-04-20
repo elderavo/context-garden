@@ -6,7 +6,7 @@ services:
       - "7433:7433"
     volumes:
       - ./data:/data
-      - ~/.ssh:/root/.ssh:ro
+      - ~/.ssh:/root/.ssh
     environment:
       # Point at your homelab Ollama instance
       CG_OLLAMA_HOST: "${CG_OLLAMA_HOST:-http://localhost:11434}"

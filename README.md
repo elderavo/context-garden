@@ -229,6 +229,9 @@ Config cascade (last wins): **defaults → config.json → env vars → `configu
 | `CG_LLM_API_KEY` | LLM API key | — |
 | `OPENAI_API_KEY` | OpenAI key (fallback for embed + LLM) | — |
 | `ANTHROPIC_API_KEY` | Anthropic key (fallback for LLM) | — |
+| `CG_GIT_SSH_COMMAND` | Full override for SSH command used by git (advanced) | auto |
+| `CG_GIT_SSH_KNOWN_HOSTS_FILE` | Writable known_hosts file path for Git SSH operations | `<clone-parent>/known_hosts` |
+| `CG_GIT_SSH_KEY_FILE` | Private key file path to pass as `ssh -i` for Git SSH operations | — |
 
 ---
 
@@ -314,3 +317,9 @@ configure(
 
 **Wrong model for synthesis**
 - Use `configure(llm_model: "...", persist: true)` or set `CG_LLM_MODEL` env var
+
+**GitLab sync over SSH fails (`known_hosts` / `publickey`)**
+- Use a reachable repo host in `gitlab_url` (for example: `git@10.0.132.100:group/repo`)
+- If `known_hosts` is not writable, set `CG_GIT_SSH_KNOWN_HOSTS_FILE` to a writable file path
+- If key auth fails, set `CG_GIT_SSH_KEY_FILE` to the private key path and verify with:
+  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T git@10.0.132.100`

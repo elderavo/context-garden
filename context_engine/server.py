@@ -93,7 +93,7 @@ def _read_workspaces_json() -> list[WorkspaceRecord]:
                 continue
             name = entry["name"]
             root_path = str(MD_DB_PATH / "code" / name)
-            workspace_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
+            workspace_id = entry.get("id") or str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
             records.append(WorkspaceRecord(
                 workspace_id=workspace_id,
                 name=name,

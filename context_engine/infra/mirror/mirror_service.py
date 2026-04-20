@@ -20,7 +20,9 @@ class NodeMirrorService:
         workspace_entry: dict[str, Any],
         gitlab_config: dict[str, Any],
     ) -> dict[str, Any]:
-        mirror_dir = str(self._data_dir / "md_db" / "code" / workspace_entry["name"])
+        mirror_dir_path = self._data_dir / "md_db" / "code" / workspace_entry["name"]
+        mirror_dir_path.mkdir(parents=True, exist_ok=True)
+        mirror_dir = str(mirror_dir_path)
         opts = {
             "scanDir": gitlab_config["cloneDir"],
             "mirrorDir": mirror_dir,
