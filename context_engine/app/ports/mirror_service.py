@@ -11,6 +11,7 @@ class MirrorService(Protocol):
         *,
         workspace_entry: dict[str, Any],
         gitlab_config: dict[str, Any],
+        force: bool = False,
     ) -> dict[str, Any]:
         ...
 

@@ -54,7 +54,7 @@ class _FakeMirrorService:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
 
-    async def run(self, *, workspace_entry: dict[str, Any], gitlab_config: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, *, workspace_entry: dict[str, Any], gitlab_config: dict[str, Any], force: bool = False) -> dict[str, Any]:
         workspace_name = workspace_entry["name"]
         note_dir = self.data_dir / "md_db" / "code" / workspace_name
         note_dir.mkdir(parents=True, exist_ok=True)

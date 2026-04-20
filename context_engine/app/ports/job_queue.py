@@ -22,6 +22,14 @@ class JobQueue(Protocol):
     ) -> Any:
         ...
 
+    def enqueue_rebuild(
+        self,
+        workspace_id: str,
+        workspace_name: str,
+        triggered_by: Literal["webhook", "manual"],
+    ) -> Any:
+        ...
+
     def list_jobs(self) -> list[Any]:
         ...
 

@@ -19,6 +19,7 @@ class NodeMirrorService:
         *,
         workspace_entry: dict[str, Any],
         gitlab_config: dict[str, Any],
+        force: bool = False,
     ) -> dict[str, Any]:
         mirror_dir_path = self._data_dir / "md_db" / "code" / workspace_entry["name"]
         mirror_dir_path.mkdir(parents=True, exist_ok=True)
@@ -27,7 +28,7 @@ class NodeMirrorService:
             "scanDir": gitlab_config["cloneDir"],
             "mirrorDir": mirror_dir,
             "languages": workspace_entry.get("languages", []),
-            "force": False,
+            "force": force,
             "workspace": workspace_entry["name"],
             "wikilinkPrefix": f"code/{workspace_entry['name']}",
             "omitPatterns": workspace_entry.get("omitPatterns"),

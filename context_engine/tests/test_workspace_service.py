@@ -26,11 +26,11 @@ class _Git:
     def __init__(self) -> None:
         self.clone_calls = []
 
-    async def clone_repo(self, *, project_url: str, clone_dir: str, branch: str, token: str | None):
+    async def clone_repo(self, *, project_url: str, clone_dir: str, branch: str, token: str | None, ssh_key_file: str | None = None):
         self.clone_calls.append((project_url, clone_dir, branch, token))
         Path(clone_dir).mkdir(parents=True, exist_ok=True)
 
-    async def fetch_and_reset(self, *, project_url: str, clone_dir: str, branch: str, token: str | None):
+    async def fetch_and_reset(self, *, project_url: str, clone_dir: str, branch: str, token: str | None, ssh_key_file: str | None = None):
         return None
 
 
@@ -38,7 +38,7 @@ class _Mirror:
     def __init__(self) -> None:
         self.calls = []
 
-    async def run(self, *, workspace_entry, gitlab_config):
+    async def run(self, *, workspace_entry, gitlab_config, force=False):
         self.calls.append((workspace_entry, gitlab_config))
         md_root = Path(workspace_entry["sourceDir"])
         md_root.mkdir(parents=True, exist_ok=True)

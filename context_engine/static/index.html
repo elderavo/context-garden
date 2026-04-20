@@ -185,6 +185,15 @@
       font-size: 11px;
     }
     .btn-sync:hover:not(:disabled) { background: rgba(88,166,255,0.15); opacity: 1; }
+    .btn-rebuild {
+      padding: 3px 9px;
+      background: rgba(210,153,34,0.08);
+      color: var(--yellow);
+      border: 1px solid rgba(210,153,34,0.2);
+      border-radius: 4px;
+      font-size: 11px;
+    }
+    .btn-rebuild:hover:not(:disabled) { background: rgba(210,153,34,0.15); opacity: 1; }
 
     /* ── Overview card ───────────────────────────────────────────────────── */
     .overview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
@@ -1281,6 +1290,7 @@
             <td class="path-cell" title="${esc(w.root_path||'')}">${esc(w.root_path||'')}</td>
             <td style="display:flex;gap:6px;align-items:center">
               <button class="btn-sync" onclick="syncWorkspace('${esc(w.workspace_id)}',this)" title="Trigger sync">Sync</button>
+              <button class="btn-rebuild" onclick="rebuildWorkspace('${esc(w.workspace_id)}',this)" title="Force-regenerate all notes (bypasses mtime guard)">Rebuild</button>
               <button class="btn-unregister" onclick="unregisterWorkspace('${esc(w.workspace_id)}',this)" title="Unregister">&#x2715;</button>
             </td>
           </tr>`;
@@ -1578,6 +1588,14 @@
     try { await fetch(`/api/workspaces/${encodeURIComponent(id)}/sync`, {method:'POST'}); } catch {}
     await pollJobs();
     btn.disabled = false; btn.textContent = 'Sync';
+    if (currentTab !== 'jobs') switchTab('jobs', document.querySelector('[data-tab="jobs"]'));
+  }
+
+  async function rebuildWorkspace(id, btn) {
+    btn.disabled = true; btn.textContent = '…';
+    try { await fetch(`/api/workspaces/${encodeURIComponent(id)}/rebuild`, {method:'POST'}); } catch {}
+    await pollJobs();
+    btn.disabled = false; btn.textContent = 'Rebuild';
     if (currentTab !== 'jobs') switchTab('jobs', document.querySelector('[data-tab="jobs"]'));
   }
 

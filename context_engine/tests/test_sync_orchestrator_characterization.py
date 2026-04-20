@@ -25,12 +25,12 @@ class _Git:
     def __init__(self):
         self.calls = []
 
-    async def fetch_and_reset(self, *, project_url: str, clone_dir: str, branch: str, token: str | None) -> None:
+    async def fetch_and_reset(self, *, project_url: str, clone_dir: str, branch: str, token: str | None, ssh_key_file: str | None = None) -> None:
         self.calls.append((project_url, clone_dir, branch, token))
 
 
 class _Mirror:
-    async def run(self, *, workspace_entry, gitlab_config):
+    async def run(self, *, workspace_entry, gitlab_config, force=False):
         return {"written": {"python": 2}}
 
 
@@ -80,15 +80,13 @@ class SyncOrchestratorCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 "Fetch complete.",
                 "Mirroring...",
                 "Mirror complete. Notes written: 2.",
-                "Triggering daemon reindex...",
-                "Reindex queued.",
             ],
         )
         self.assertEqual(
             git.calls,
             [("https://gitlab.example.com/org/repo", "/tmp/repo", "main", "abc123")],
         )
-        self.assertEqual(indexer.calls, ["alpha"])
+        self.assertEqual(indexer.calls, [])
 
 
 if __name__ == "__main__":

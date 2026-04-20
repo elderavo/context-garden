@@ -58,6 +58,26 @@ class SyncOrchestrator:
         if mirror_error:
             raise RuntimeError(f"Mirror failed: {mirror_error}")
 
+    async def execute_rebuild(self, *, job: Any, log: Callable[[str], None]) -> None:
+        """Force-regenerate all notes (bypasses mtime guard) then reindex."""
+        entry = self.workspace_repository.get_by_id(job.workspace_id)
+        if not entry:
+            raise KeyError(f"Workspace {job.workspace_id} not found in registry")
+
+        mirror_config = entry.get("gitlabConfig") or {"cloneDir": entry["sourceDir"]}
+
+        log("Force-mirroring (bypassing mtime guard)...")
+        try:
+            result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=mirror_config, force=True)
+            written = sum(result.get("written", {}).values()) if isinstance(result.get("written"), dict) else 0
+            log(f"Mirror complete. Notes written: {written}.")
+        except Exception as exc:
+            raise RuntimeError(f"Mirror failed: {exc}") from exc
+
+        log("Triggering reindex...")
+        await self.indexer_service.trigger_reindex(workspace_name=job.workspace_name)
+        log("Rebuild complete.")
+
     async def execute_index(self, *, job: Any, log: Callable[[str], None]) -> None:
         log("Triggering daemon reindex...")
         try:

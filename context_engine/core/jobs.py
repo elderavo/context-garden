@@ -23,7 +23,7 @@ from ..app.services import sync_orchestrator as sync_orchestrator_adapter
 
 log = logging.getLogger(__name__)
 
-JobType = Literal["sync_workspace", "index_workspace"]
+JobType = Literal["sync_workspace", "index_workspace", "rebuild_workspace"]
 JobStatus = Literal["pending", "running", "done", "failed"]
 
 MAX_HISTORY = 200
@@ -108,6 +108,19 @@ def enqueue_index(
     if existing:
         return existing
     job = _make_job("index_workspace", workspace_id, workspace_name, triggered_by)
+    _push_and_schedule(job)
+    return job
+
+
+def enqueue_rebuild(
+    workspace_id: str,
+    workspace_name: str,
+    triggered_by: Literal["webhook", "manual"] = "manual",
+) -> Job:
+    existing = _find_active(workspace_id, "rebuild_workspace")
+    if existing:
+        return existing
+    job = _make_job("rebuild_workspace", workspace_id, workspace_name, triggered_by)
     _push_and_schedule(job)
     return job
 
@@ -219,6 +232,8 @@ async def _run_workspace_worker(workspace_id: str) -> None:
             try:
                 if job.type == "sync_workspace":
                     await _execute_sync_job(job)
+                elif job.type == "rebuild_workspace":
+                    await _execute_rebuild_job(job)
                 else:
                     await _execute_index_job(job)
                 job.status = "done"
@@ -248,3 +263,8 @@ async def _execute_sync_job(job: Job) -> None:
 async def _execute_index_job(job: Job) -> None:
     orchestrator = _require_orchestrator()
     await orchestrator.execute_index(job=job, log=lambda line: _log(job, line))
+
+
+async def _execute_rebuild_job(job: Job) -> None:
+    orchestrator = _require_orchestrator()
+    await orchestrator.execute_rebuild(job=job, log=lambda line: _log(job, line))

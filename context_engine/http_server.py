@@ -186,6 +186,17 @@ async def _handle_workspace_index(req: Request) -> JSONResponse:
     return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
 
 
+async def _handle_workspace_rebuild(req: Request) -> JSONResponse:
+    workspace_id = req.path_params["id"]
+    entries = req.app.state.workspace_repo.list_all()
+    entry = next((w for w in entries if w["id"] == workspace_id), None)
+    if not entry:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+
+    job = req.app.state.job_queue.enqueue_rebuild(entry["id"], entry["name"], "manual")
+    return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
+
+
 async def _handle_workspace_unregister(req: Request) -> JSONResponse:
     workspace_id = req.path_params["id"]
     result = workspace_service.unregister_workspace(
@@ -471,6 +482,8 @@ def make_http_app(
         Route("/workspaces", _handle_list_workspaces, methods=["GET"]),
         Route("/workspaces/{id}/sync", _handle_workspace_sync, methods=["POST"]),
         Route("/workspaces/{id}/index", _handle_workspace_index, methods=["POST"]),
+        Route("/workspaces/{id}/rebuild", _handle_workspace_rebuild, methods=["POST"]),
+        Route("/api/workspaces/{id}/rebuild", _handle_workspace_rebuild, methods=["POST"]),
         Route("/workspaces/{id}/unregister", _handle_workspace_unregister, methods=["POST"]),
         Route("/api/workspaces/{id}/unregister", _handle_workspace_unregister, methods=["POST"]),
 
