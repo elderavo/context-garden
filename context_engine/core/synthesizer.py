@@ -331,12 +331,17 @@ def synthesize(
 
     system_prompt = _load_personality(personalities_dir)
 
+    # Cap context sent to LLM to avoid token/rate-limit blowouts
+    context_window = synth_config.get("context_window", 32768)
+    max_context_chars = context_window * 3  # ~4 chars/token, leave room for prompt + output
+    truncated = raw_context[:max_context_chars]
+
     user_prompt = "\n".join([
         "## Query",
         f'"{query}"',
         "",
         "## Retrieved Context",
-        raw_context,
+        truncated,
     ])
 
     messages = [
