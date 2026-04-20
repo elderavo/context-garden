@@ -6,13 +6,13 @@ services:
       - "7433:7433"
     volumes:
       - ./data:/data
-      - ~/.ssh:/root/.ssh
+      - /opt/context-garden/ssh/id_ed25519:/run/secrets/git_ssh_key:ro
+      - /opt/context-garden/ssh/known_hosts:/root/.ssh/known_hosts:ro
     environment:
-      # Point at your homelab Ollama instance
       CG_OLLAMA_HOST: "${CG_OLLAMA_HOST:-http://localhost:11434}"
       CG_WEBAPP_PORT: "7433"
+      GIT_SSH_COMMAND: "ssh -F /dev/null -i /run/secrets/git_ssh_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts -p 2222"
     extra_hosts:
-      # Lets the container reach host-network services on Linux
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7433/api/health"]
