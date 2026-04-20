@@ -418,10 +418,92 @@ class KnowledgeGraphEngine:
             )
             # No query embedding available in keyword-only path — triple scoring skipped
 
+        # Inter-seed paths: find connecting paths between top-3 seeds, merge path notes
+        path_traces: list[dict] = []
+        if len(seed_notes) >= 2 and self.graph_store is not None:
+            path_traces, path_notes = self._find_inter_seed_paths(seed_notes[:3])
+            seed_ids = {n.note_id for n in seed_notes}
+            for pn in path_notes:
+                if pn.note_id not in seed_ids:
+                    expanded_notes.append(pn)
+                    seed_ids.add(pn.note_id)
+
+        # Format + synthesize
+        from .synthesizer import format_context, synthesize
+        from ..config import get_synth_config
+        raw_context = format_context(seed_notes, expanded_notes, path_traces or None)
+        synth_config = get_synth_config()
+        formatted_context = synthesize(query, seed_notes, raw_context, synth_config) or raw_context
+
         return {
             "seed_notes": [self._note_to_dict(n) for n in seed_notes],
             "expanded_notes": [self._note_to_dict(n) for n in expanded_notes],
+            "formattedContext": formatted_context,
         }
+
+    # ------------------------------------------------------------------
+    # Inter-seed path finding
+    # ------------------------------------------------------------------
+
+    def _find_inter_seed_paths(
+        self,
+        top_seeds: list[RetrievedNote],
+    ) -> tuple[list[dict], list[RetrievedNote]]:
+        """Find shortest paths between all pairs of top seeds using self.find_path().
+
+        Returns (path_traces, path_notes). Caller deduplicates against existing seeds.
+        """
+        path_traces: list[dict] = []
+        path_notes: list[RetrievedNote] = []
+        seen_path_ids: set[str] = set()
+
+        pairs = [
+            (top_seeds[i], top_seeds[j])
+            for i in range(len(top_seeds))
+            for j in range(i + 1, len(top_seeds))
+        ]
+
+        for a, b in pairs:
+            try:
+                result = self.find_path(start_query=a.note_id, end_query=b.note_id)
+            except Exception as exc:
+                log.debug("Path %s→%s failed: %s", a.note_id, b.note_id, exc)
+                continue
+
+            if result.get("no_path"):
+                continue
+
+            path_traces.append({
+                "startId": result["start_id"],
+                "endId": result["end_id"],
+                "steps": result.get("path_steps", []),
+            })
+
+            for note_dict in result.get("path_notes", []):
+                nid = note_dict.get("noteId", "")
+                if not nid or nid in seen_path_ids:
+                    continue
+                parsed = self._parsed_notes.get(nid)
+                if parsed:
+                    path_notes.append(RetrievedNote(
+                        note_id=parsed.note_id,
+                        path=parsed.path,
+                        content=parsed.body,
+                        score=note_dict.get("score", 0.5),
+                        type=parsed.note_type,  # type: ignore[arg-type]
+                        retrieval_source="path",
+                        tool_id=parsed.tool_id,
+                        tags=parsed.tags,
+                        linked_from=[a.note_id],
+                        depth=1,
+                        tier=parsed.tier,
+                        workspace=parsed.workspace,
+                        title=parsed.title,
+                    ))
+                    seen_path_ids.add(nid)
+
+        log.info("Inter-seed paths: %d traces, %d new path notes", len(path_traces), len(path_notes))
+        return path_traces, path_notes
 
     # ------------------------------------------------------------------
     # Graph expansion (reusable)
