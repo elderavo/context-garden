@@ -462,15 +462,21 @@ class KnowledgeGraphEngine:
             for i in range(len(top_seeds))
             for j in range(i + 1, len(top_seeds))
         ]
+        log.info("Inter-seed pathfinding: %d seeds → %d pairs", len(top_seeds), len(pairs))
 
         for a, b in pairs:
             try:
                 result = self.find_path(start_query=a.note_id, end_query=b.note_id)
             except Exception as exc:
-                log.debug("Path %s→%s failed: %s", a.note_id, b.note_id, exc)
+                log.warning("Path %s→%s raised: %s", a.note_id, b.note_id, exc)
                 continue
 
             if result.get("no_path"):
+                log.info(
+                    "No path: %s (%s) → %s (%s)",
+                    result.get("start_id"), result.get("start_resolved_by"),
+                    result.get("end_id"), result.get("end_resolved_by"),
+                )
                 continue
 
             path_traces.append({

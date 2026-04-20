@@ -78,7 +78,10 @@ def find_shortest_path(
     adj = _build_adjacency(graph_store, allowed_edge_types)
 
     if start_id not in adj and start_id != end_id:
-        # Start node has no edges at all — might still be end if equal (handled above)
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "Pathfinder: start_id %r has no edges in graph (adj size=%d)", start_id, len(adj)
+        )
         return None
 
     # BFS with parent tracking
