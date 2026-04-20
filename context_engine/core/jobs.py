@@ -242,6 +242,7 @@ def _require_orchestrator() -> sync_orchestrator_adapter.SyncOrchestrator:
 async def _execute_sync_job(job: Job) -> None:
     orchestrator = _require_orchestrator()
     await orchestrator.execute_sync(job=job, log=lambda line: _log(job, line))
+    enqueue_index(job.workspace_id, job.workspace_name, job.triggered_by)
 
 
 async def _execute_index_job(job: Job) -> None:
