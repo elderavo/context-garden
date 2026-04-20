@@ -124,7 +124,7 @@ def load_config() -> dict[str, Any]:
         }
     """
     config_path = _DATA_DIR / ".context-garden" / "config.json"
-    env_file = Path.home() / ".context-garden" / ".env"
+    env_file = _DATA_DIR / ".context-garden" / "secrets.env"
 
     secrets = _load_dotenv(env_file)
 
@@ -268,8 +268,8 @@ def write_config(patch: dict[str, Any], persist: bool = True) -> None:
         if flat_key in patch and patch[flat_key]:
             synth_raw[raw_key] = patch[flat_key]
 
-    # API keys go to ~/.context-garden/.env, never config.json
-    env_file = Path.home() / ".context-garden" / ".env"
+    # API keys go to secrets.env in the data dir (persists in Docker volume), never config.json
+    env_file = _DATA_DIR / ".context-garden" / "secrets.env"
     env_file.parent.mkdir(parents=True, exist_ok=True)
     env_lines: list[str] = []
     try:
