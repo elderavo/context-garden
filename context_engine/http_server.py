@@ -449,8 +449,9 @@ def make_http_app(
             activity_ring=_activity_ring,
             rate_ring=_rate_ring,
         )
+        mcp_asgi_app = mcp_server.streamable_http_app()
         mcp_session_manager = mcp_server.session_manager
-        routes.append(Mount("/mcp", app=mcp_server.streamable_http_app()))
+        routes.append(Mount("/mcp", app=mcp_asgi_app))
 
     @asynccontextmanager
     async def lifespan(_app: Starlette):
