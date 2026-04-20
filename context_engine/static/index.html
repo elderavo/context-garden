@@ -611,6 +611,61 @@
       margin-right: 6px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Settings tab ────────────────────────────────────────────────────── */
+    .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+    @media (max-width: 700px) { .settings-grid { grid-template-columns: 1fr; } }
+
+    .settings-section-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .key-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: flex-end;
+    }
+
+    .btn-save {
+      padding: 7px 22px;
+      background: rgba(63,185,80,0.1);
+      color: var(--green);
+      border: 1px solid rgba(63,185,80,0.3);
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      letter-spacing: 0.04em;
+      margin-top: 16px;
+    }
+    .btn-save:hover:not(:disabled) { background: rgba(63,185,80,0.18); opacity: 1; }
+    .btn-save:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .key-set-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 9px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      align-self: flex-end;
+      margin-bottom: 1px;
+    }
+    .key-set-badge.set   { background: rgba(63,185,80,0.1);  color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
+    .key-set-badge.unset { background: rgba(248,81,73,0.08); color: var(--muted); border: 1px solid rgba(248,81,73,0.15); }
   </style>
 </head>
 <body>
@@ -633,6 +688,7 @@
   </button>
   <button class="tab-btn" data-tab="activity" onclick="switchTab('activity',this)">Activity</button>
   <button class="tab-btn" data-tab="retrieve" onclick="switchTab('retrieve',this)">Retrieve</button>
+  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings',this)">Settings</button>
 </nav>
 
 <!-- ════════════════════════════ OVERVIEW ════════════════════════════════ -->
@@ -738,8 +794,18 @@
 
     <div class="form-row form-group">
       <div>
-        <label class="form-label">Languages <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
-        <input class="form-input" id="reg-languages" type="text" placeholder="python, typescript">
+        <label class="form-label">Languages</label>
+        <div style="display:flex;gap:8px;padding:7px 0">
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text)">
+            <input type="checkbox" id="reg-lang-ts" value="ts" checked style="accent-color:var(--green)"> TypeScript
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text)">
+            <input type="checkbox" id="reg-lang-py" value="py" style="accent-color:var(--green)"> Python
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text)">
+            <input type="checkbox" id="reg-lang-c" value="c" style="accent-color:var(--green)"> C
+          </label>
+        </div>
       </div>
       <div>
         <label class="form-label">Omit patterns <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
@@ -870,6 +936,63 @@
 </main>
 </div>
 
+<!-- ════════════════════════════ SETTINGS ════════════════════════════════ -->
+<div id="panel-settings" class="tab-panel">
+<main>
+  <div class="settings-grid">
+    <div class="card">
+      <div class="settings-section-title">Embedding Provider</div>
+      <div class="form-group">
+        <label class="form-label">Provider</label>
+        <input class="form-input" id="cfg-embed-provider" type="text" placeholder="ollama / openai / local">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Model</label>
+        <input class="form-input" id="cfg-embed-model" type="text" placeholder="nomic-embed-text:latest">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Host</label>
+        <input class="form-input" id="cfg-embed-host" type="text" placeholder="http://localhost:11434">
+      </div>
+      <div class="form-group">
+        <label class="form-label">API Key</label>
+        <div class="key-row">
+          <input class="form-input" id="cfg-embed-key" type="password" placeholder="Leave blank to keep existing">
+          <span class="key-set-badge unset" id="cfg-embed-key-badge">not set</span>
+        </div>
+      </div>
+      <button class="btn-save" id="btn-save-embed" onclick="saveConfig('embed')">Save Embed</button>
+      <div class="form-msg" id="cfg-embed-msg"></div>
+    </div>
+
+    <div class="card">
+      <div class="settings-section-title">LLM Provider (Synthesizer)</div>
+      <div class="form-group">
+        <label class="form-label">Provider</label>
+        <input class="form-input" id="cfg-llm-provider" type="text" placeholder="ollama / openai / anthropic">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Model</label>
+        <input class="form-input" id="cfg-llm-model" type="text" placeholder="gpt-4o-mini">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Host</label>
+        <input class="form-input" id="cfg-llm-host" type="text" placeholder="https://api.openai.com">
+      </div>
+      <div class="form-group">
+        <label class="form-label">API Key</label>
+        <div class="key-row">
+          <input class="form-input" id="cfg-llm-key" type="password" placeholder="Leave blank to keep existing">
+          <span class="key-set-badge unset" id="cfg-llm-key-badge">not set</span>
+        </div>
+      </div>
+      <button class="btn-save" id="btn-save-llm" onclick="saveConfig('llm')">Save LLM</button>
+      <div class="form-msg" id="cfg-llm-msg"></div>
+    </div>
+  </div>
+</main>
+</div>
+
 <script>
   // ── State ─────────────────────────────────────────────────────────────────
   let currentTab    = 'overview';
@@ -891,6 +1014,7 @@
     if (tab === 'activity') renderActivity();
     if (tab === 'jobs')     renderJobs();
     if (tab === 'retrieve') updateRetrieveWorkspaceSelector();
+    if (tab === 'settings') loadConfig();
     if (tab !== 'activity') stopLiveLog();
   }
 
@@ -1381,9 +1505,8 @@
 
     if (!name) { msg.textContent = 'Name is required.'; msg.className = 'form-msg err'; return; }
 
-    const langRaw = document.getElementById('reg-languages').value.trim();
+    const languages = ['ts','py','c'].filter(id => document.getElementById('reg-lang-'+id)?.checked);
     const omitRaw = document.getElementById('reg-omit').value.trim();
-    const languages = langRaw ? langRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
     const omit_patterns = omitRaw ? omitRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
 
     let payload = { name, source_type: regSrcType, languages, omit_patterns };
@@ -1413,7 +1536,7 @@
       msg.textContent = `✓ Registered "${data.entry?.name || name}" — indexing started`;
       msg.className = 'form-msg ok';
       // Reset form
-      ['reg-name-gitlab','reg-name-local','reg-gitlab-url','reg-token','reg-source-dir','reg-languages','reg-omit'].forEach(id => {
+      ['reg-name-gitlab','reg-name-local','reg-gitlab-url','reg-token','reg-source-dir','reg-omit'].forEach(id => {
         const el = document.getElementById(id); if (el) el.value = '';
       });
       document.getElementById('reg-branch').value = 'main';
@@ -1506,6 +1629,83 @@
       </div>
       ${seedsHtml}${expandedHtml}
     </div>`;
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  async function loadConfig() {
+    try {
+      const res  = await fetch('/api/config');
+      const data = await res.json();
+
+      document.getElementById('cfg-embed-provider').value = data.embedProvider || '';
+      document.getElementById('cfg-embed-model').value    = data.embedModel    || '';
+      document.getElementById('cfg-embed-host').value     = data.embedHost     || '';
+      document.getElementById('cfg-embed-key').value      = '';
+      const embedBadge = document.getElementById('cfg-embed-key-badge');
+      embedBadge.textContent = data.embedApiKeySet ? '✓ set' : 'not set';
+      embedBadge.className   = 'key-set-badge ' + (data.embedApiKeySet ? 'set' : 'unset');
+
+      document.getElementById('cfg-llm-provider').value = data.llmProvider || '';
+      document.getElementById('cfg-llm-model').value    = data.llmModel    || '';
+      document.getElementById('cfg-llm-host').value     = data.llmHost     || '';
+      document.getElementById('cfg-llm-key').value      = '';
+      const llmBadge = document.getElementById('cfg-llm-key-badge');
+      llmBadge.textContent = data.llmApiKeySet ? '✓ set' : 'not set';
+      llmBadge.className   = 'key-set-badge ' + (data.llmApiKeySet ? 'set' : 'unset');
+    } catch (e) {
+      console.error('Failed to load config', e);
+    }
+  }
+
+  async function saveConfig(section) {
+    const isEmbed = section === 'embed';
+    const btn = document.getElementById(isEmbed ? 'btn-save-embed' : 'btn-save-llm');
+    const msg = document.getElementById(isEmbed ? 'cfg-embed-msg' : 'cfg-llm-msg');
+
+    const patch = {};
+    if (isEmbed) {
+      const p = document.getElementById('cfg-embed-provider').value.trim();
+      const m = document.getElementById('cfg-embed-model').value.trim();
+      const h = document.getElementById('cfg-embed-host').value.trim();
+      const k = document.getElementById('cfg-embed-key').value.trim();
+      if (p) patch.embedProvider = p;
+      if (m) patch.embedModel    = m;
+      if (h) patch.embedHost     = h;
+      if (k) patch.embedApiKey   = k;
+    } else {
+      const p = document.getElementById('cfg-llm-provider').value.trim();
+      const m = document.getElementById('cfg-llm-model').value.trim();
+      const h = document.getElementById('cfg-llm-host').value.trim();
+      const k = document.getElementById('cfg-llm-key').value.trim();
+      if (p) patch.llmProvider = p;
+      if (m) patch.llmModel    = m;
+      if (h) patch.llmHost     = h;
+      if (k) patch.llmApiKey   = k;
+    }
+
+    if (Object.keys(patch).length === 0) {
+      msg.textContent = 'Nothing to save.';
+      msg.className = 'form-msg';
+      return;
+    }
+
+    btn.disabled = true;
+    msg.textContent = '';
+    msg.className = 'form-msg';
+
+    try {
+      const res  = await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(patch) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      msg.textContent = '✓ Saved';
+      msg.className = 'form-msg ok';
+      await loadConfig();
+    } catch (e) {
+      msg.textContent = '✗ ' + e.message;
+      msg.className = 'form-msg err';
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────────

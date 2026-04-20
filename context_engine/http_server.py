@@ -258,6 +258,39 @@ async def _handle_config_reload(_req: Request) -> JSONResponse:
     return JSONResponse({"status": "reloaded"})
 
 
+async def _handle_config_get(_req: Request) -> JSONResponse:
+    from .config import get_config_snapshot
+    snap = get_config_snapshot()
+    return JSONResponse({
+        "embedProvider":  snap["embedProvider"],
+        "embedModel":     snap["embedModel"],
+        "embedHost":      snap["embedHost"],
+        "embedApiKeySet": bool(snap["embedApiKey"]),
+        "llmProvider":    snap["llmProvider"],
+        "llmModel":       snap["llmModel"],
+        "llmHost":        snap["llmHost"],
+        "llmApiKeySet":   bool(snap["llmApiKey"]),
+    })
+
+
+async def _handle_config_update(req: Request) -> JSONResponse:
+    from .config import write_config, reload_config
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    allowed = {"embedProvider", "embedModel", "embedHost", "embedApiKey",
+               "llmProvider", "llmModel", "llmHost", "llmApiKey"}
+    patch = {k: v for k, v in body.items() if k in allowed and v is not None}
+    if not patch:
+        return JSONResponse({"error": "No valid fields provided"}, status_code=400)
+
+    write_config(patch, persist=True)
+    reload_config()
+    return JSONResponse({"status": "saved"})
+
+
 async def _handle_activity(_req: Request) -> JSONResponse:
     return JSONResponse(list(_activity_ring))
 
@@ -438,6 +471,8 @@ def make_http_app(
         Route("/api/daemon/stop", _handle_daemon_stop, methods=["POST"]),
         Route("/api/daemon/restart", _handle_daemon_restart, methods=["POST"]),
         Route("/api/config/reload", _handle_config_reload, methods=["POST"]),
+        Route("/api/config", _handle_config_get, methods=["GET"]),
+        Route("/api/config", _handle_config_update, methods=["POST"]),
     ]
 
     mcp_session_manager = None
