@@ -54,21 +54,16 @@ class SyncOrchestrator:
             mirror_error = str(exc)
             log(f"Mirror failed (will still reindex existing notes): {exc}")
 
-        await self._trigger_reindex(workspace_name=entry["name"], log=log)
-
         if mirror_error:
             raise RuntimeError(f"Mirror failed: {mirror_error}")
 
     async def execute_index(self, *, job: Any, log: Callable[[str], None]) -> None:
-        await self._trigger_reindex(workspace_name=job.workspace_name, log=log)
-
-    async def _trigger_reindex(self, *, workspace_name: str, log: Callable[[str], None]) -> None:
         log("Triggering daemon reindex...")
         try:
-            await self.indexer_service.trigger_reindex(workspace_name=workspace_name)
-            log("Reindex queued.")
+            await self.indexer_service.trigger_reindex(workspace_name=job.workspace_name)
+            log("Reindex complete.")
         except Exception as exc:
-            log(f"Warning: reindex failed (daemon may be busy): {exc}")
+            log(f"Warning: reindex failed: {exc}")
 
     @staticmethod
     def _resolve_token(gitlab_config: dict[str, str]) -> str | None:
