@@ -16,7 +16,7 @@ from ..ports.git_client import GitClient
 from ..ports.mirror_service import MirrorService
 from ..ports.workspace_repository import WorkspaceRepository
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$")
 
 
 class JobLike(Protocol):
@@ -203,8 +203,8 @@ def _validate_name(name: str) -> None:
         raise ValueError(f'Workspace name must be 2-64 characters, got "{name}"')
     if not NAME_RE.match(name):
         raise ValueError(
-            "Workspace name must be lowercase alphanumeric + hyphens "
-            '(no leading/trailing hyphen), got "{name}"'.format(name=name)
+            "Workspace name must be lowercase alphanumeric + hyphens/underscores "
+            '(no leading/trailing hyphen/underscore), got "{name}"'.format(name=name)
         )
 
 
