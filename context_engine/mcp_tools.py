@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .config import get_config_snapshot, write_config, get_synth_config
 
@@ -41,7 +42,11 @@ def create_mcp_server(
 ) -> FastMCP:
     """Build and return the FastMCP server wired to the live daemon."""
 
-    mcp = FastMCP("context-garden", streamable_http_path="/")
+    mcp = FastMCP(
+        "context-garden",
+        streamable_http_path="/",
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
 
     # ── retrieve_context ──────────────────────────────────────────────────────
 
