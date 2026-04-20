@@ -400,7 +400,13 @@ def make_http_app(
     def _noop_shutdown() -> None:
         log.warning("Shutdown requested but no shutdown_fn configured")
 
+    async def _handle_oauth_protected_resource(req: Request) -> JSONResponse:
+        # MCP 2025-03-26 clients probe this before connecting; empty auth servers = no auth required.
+        base = str(req.base_url).rstrip("/")
+        return JSONResponse({"resource": f"{base}/mcp/", "authorization_servers": []})
+
     routes = [
+        Route("/.well-known/oauth-protected-resource", _handle_oauth_protected_resource, methods=["GET"]),
         Route("/", _handle_index, methods=["GET"]),
         Route("/webhooks/gitlab", _handle_gitlab_webhook, methods=["POST"]),
 
