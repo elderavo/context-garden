@@ -87,6 +87,7 @@ async def register_workspace(
     gitlab_url = payload.get("gitlab_url")
     gitlab_branch = str(payload.get("gitlab_branch") or "main")
     gitlab_token = payload.get("gitlab_token")
+    ssh_key_file = payload.get("ssh_key_file") or None
     source_dir = payload.get("source_dir")
     source_type = payload.get("source_type")
     languages = payload.get("languages") or []
@@ -116,6 +117,7 @@ async def register_workspace(
             clone_dir=clone_dir,
             branch=gitlab_branch,
             token=token,
+            ssh_key_file=ssh_key_file,
         )
         resolved_source_dir = clone_dir
         resolved_source_type = "gitlab"
@@ -144,6 +146,8 @@ async def register_workspace(
     }
     if omit_patterns:
         entry["omitPatterns"] = omit_patterns
+    if ssh_key_file:
+        entry["sshKeyFile"] = ssh_key_file
     if gitlab_config is not None:
         entry["gitlabConfig"] = gitlab_config
 

@@ -209,6 +209,27 @@ async def _handle_workspace_unregister(req: Request) -> JSONResponse:
     )
 
 
+async def _handle_workspaces_set_ssh(req: Request) -> JSONResponse:
+    """PATCH /api/workspaces/ssh — set sshKeyFile on all registered workspaces."""
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    ssh_key_file = body.get("sshKeyFile", "").strip() or None
+    repo = req.app.state.workspace_repo
+    entries = repo.list_all()
+    updated = 0
+    for entry in entries:
+        if ssh_key_file:
+            entry["sshKeyFile"] = ssh_key_file
+        else:
+            entry.pop("sshKeyFile", None)
+        updated += 1
+    repo.save_all(entries)
+    return JSONResponse({"updated": updated, "sshKeyFile": ssh_key_file or ""})
+
+
 async def _handle_list_jobs(req: Request) -> JSONResponse:
     return JSONResponse([
         {
@@ -270,6 +291,7 @@ async def _handle_config_get(_req: Request) -> JSONResponse:
         "llmModel":       snap["llmModel"],
         "llmHost":        snap["llmHost"],
         "llmApiKeySet":   bool(snap["llmApiKey"]),
+        "sshKeyFile":     snap.get("sshKeyFile", ""),
     })
 
 
@@ -445,6 +467,7 @@ def make_http_app(
 
         Route("/api/workspaces", _handle_register_workspace, methods=["POST"]),
         Route("/api/workspaces", _handle_list_workspaces, methods=["GET"]),
+        Route("/api/workspaces/ssh", _handle_workspaces_set_ssh, methods=["PATCH"]),
         Route("/workspaces", _handle_list_workspaces, methods=["GET"]),
         Route("/workspaces/{id}/sync", _handle_workspace_sync, methods=["POST"]),
         Route("/workspaces/{id}/index", _handle_workspace_index, methods=["POST"]),

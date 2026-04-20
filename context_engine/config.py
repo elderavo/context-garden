@@ -213,6 +213,8 @@ def get_config_snapshot() -> dict[str, Any]:
     """Return a flat snapshot suitable for the MCP configure/setup tools."""
     embed = get_embed_config()
     synth = get_synth_config()
+    env_file = _DATA_DIR / ".context-garden" / "secrets.env"
+    secrets = _load_dotenv(env_file)
     return {
         "embedProvider": embed.get("provider", ""),
         "embedModel": embed.get("model", ""),
@@ -225,6 +227,7 @@ def get_config_snapshot() -> dict[str, Any]:
         "llmContextWindow": synth.get("context_window", 32768),
         "llmMaxTokens": synth.get("max_tokens", 4096),
         "llmApiKey": synth.get("api_key", ""),
+        "sshKeyFile": secrets.get("CG_GIT_SSH_KEY_FILE", ""),
     }
 
 
@@ -290,6 +293,8 @@ def write_config(patch: dict[str, Any], persist: bool = True) -> None:
     if patch.get("llmApiKey"):
         env_lines = _upsert_env(env_lines, "CG_LLM_API_KEY", patch["llmApiKey"])
         synth_raw["apiKeyRef"] = "env:CG_LLM_API_KEY"
+    if "sshKeyFile" in patch:
+        env_lines = _upsert_env(env_lines, "CG_GIT_SSH_KEY_FILE", patch["sshKeyFile"])
 
     if persist:
         config_path.write_text(json.dumps(raw, indent=2), "utf-8")

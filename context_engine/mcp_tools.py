@@ -231,6 +231,7 @@ def create_mcp_server(
         gitlab_url: str | None = None,
         gitlab_branch: str = "main",
         gitlab_token: str | None = None,
+        ssh_key_file: str | None = None,
         source_dir: str | None = None,
     ) -> str:
         """
@@ -239,6 +240,7 @@ def create_mcp_server(
         gitlab_url: GitLab project URL. Preferred over source_dir.
         gitlab_branch: Branch to track (default: main).
         gitlab_token: Personal access token. Falls back to CG_GITLAB_TOKEN env var.
+        ssh_key_file: Path to SSH private key for git operations (e.g. /root/.ssh/id_ed25519).
         source_dir: Absolute path to a local directory (use gitlab_url instead).
         """
         from .app.services import workspace_service
@@ -250,6 +252,7 @@ def create_mcp_server(
             "gitlab_url": gitlab_url,
             "gitlab_branch": gitlab_branch,
             "gitlab_token": gitlab_token,
+            "ssh_key_file": ssh_key_file,
             "source_dir": source_dir,
         }
         result = await workspace_service.register_workspace(

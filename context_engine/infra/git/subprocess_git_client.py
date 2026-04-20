@@ -18,9 +18,10 @@ class SubprocessGitClient:
         clone_dir: str,
         branch: str,
         token: Optional[str],
+        ssh_key_file: Optional[str] = None,
     ) -> None:
         auth_url = self._build_auth_url(project_url, token)
-        env = self._build_git_env(project_url=project_url, clone_dir=clone_dir)
+        env = self._build_git_env(project_url=project_url, clone_dir=clone_dir, ssh_key_file=ssh_key_file)
         await self._run_git(
             ["clone", "--depth=1", f"--branch={branch}", "--no-single-branch", auth_url, clone_dir],
             cwd=None,
@@ -34,9 +35,10 @@ class SubprocessGitClient:
         clone_dir: str,
         branch: str,
         token: Optional[str],
+        ssh_key_file: Optional[str] = None,
     ) -> None:
         auth_url = self._build_auth_url(project_url, token)
-        env = self._build_git_env(project_url=project_url, clone_dir=clone_dir)
+        env = self._build_git_env(project_url=project_url, clone_dir=clone_dir, ssh_key_file=ssh_key_file)
         await self._run_git(["remote", "set-url", "origin", auth_url], cwd=clone_dir, env=env)
         await self._run_git(["fetch", "origin", branch], cwd=clone_dir, env=env)
         await self._run_git(["reset", "--hard", f"origin/{branch}"], cwd=clone_dir, env=env)
@@ -59,7 +61,12 @@ class SubprocessGitClient:
         return urlunparse(parsed._replace(netloc=netloc))
 
     @staticmethod
-    def _build_git_env(*, project_url: str, clone_dir: str) -> dict[str, str]:
+    def _build_git_env(
+        *,
+        project_url: str,
+        clone_dir: str,
+        ssh_key_file: Optional[str] = None,
+    ) -> dict[str, str]:
         env = os.environ.copy()
         if not (project_url.startswith("git@") or project_url.startswith("ssh://")):
             return env
@@ -88,9 +95,10 @@ class SubprocessGitClient:
             f"UserKnownHostsFile={known_hosts_path}",
         ]
 
-        key_file = env.get("CG_GIT_SSH_KEY_FILE")
-        if key_file:
-            ssh_args.extend(["-i", str(Path(key_file).expanduser())])
+        # Per-workspace key takes precedence over env var fallback
+        resolved_key = ssh_key_file or env.get("CG_GIT_SSH_KEY_FILE")
+        if resolved_key:
+            ssh_args.extend(["-i", str(Path(resolved_key).expanduser())])
 
         env["GIT_SSH_COMMAND"] = shlex.join(ssh_args)
         return env

@@ -13,6 +13,7 @@ class GitClient(Protocol):
         clone_dir: str,
         branch: str,
         token: Optional[str],
+        ssh_key_file: Optional[str] = None,
     ) -> None:
         ...
 
@@ -23,5 +24,6 @@ class GitClient(Protocol):
         clone_dir: str,
         branch: str,
         token: Optional[str],
+        ssh_key_file: Optional[str] = None,
     ) -> None:
         ...

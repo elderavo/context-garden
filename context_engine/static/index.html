@@ -666,6 +666,85 @@
     }
     .key-set-badge.set   { background: rgba(63,185,80,0.1);  color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
     .key-set-badge.unset { background: rgba(248,81,73,0.08); color: var(--muted); border: 1px solid rgba(248,81,73,0.15); }
+
+    /* ── Settings SSH card (full-width below 2-col grid) ─────────────────── */
+    .settings-ssh-card { margin-top: 0; }
+    .ssh-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: flex-end; }
+    .btn-apply-ssh {
+      padding: 7px 16px;
+      background: rgba(88,166,255,0.08);
+      color: var(--blue);
+      border: 1px solid rgba(88,166,255,0.25);
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s, opacity 0.15s;
+      letter-spacing: 0.04em;
+      margin-top: 16px;
+    }
+    .btn-apply-ssh:hover:not(:disabled) { background: rgba(88,166,255,0.15); opacity: 1; }
+    .btn-apply-ssh:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* ── Multi-select language dropdown ──────────────────────────────────── */
+    .multiselect { position: relative; }
+    .multiselect-trigger {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      transition: border-color 0.15s;
+      user-select: none;
+    }
+    .multiselect-trigger:focus,
+    .multiselect.open .multiselect-trigger { border-color: rgba(88,166,255,0.5); }
+    .multiselect-arrow { color: var(--muted); font-size: 10px; flex-shrink: 0; transition: transform 0.15s; }
+    .multiselect.open .multiselect-arrow { transform: rotate(180deg); }
+    .multiselect-display { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .multiselect-display.placeholder { color: var(--muted); }
+    .multiselect-options {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      background: var(--raised);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      z-index: 50;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    }
+    .multiselect.open .multiselect-options { display: block; }
+    .multiselect-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text);
+      transition: background 0.1s;
+    }
+    .multiselect-option:hover { background: var(--surface); }
+    .multiselect-option input[type="checkbox"] {
+      accent-color: var(--green);
+      cursor: pointer;
+      width: 13px;
+      height: 13px;
+      flex-shrink: 0;
+    }
   </style>
 </head>
 <body>
@@ -779,6 +858,10 @@
         <label class="form-label">Token <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
         <input class="form-input" id="reg-token" type="password" placeholder="glpat-…">
       </div>
+      <div class="form-group">
+        <label class="form-label">SSH Key File <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+        <input class="form-input" id="reg-ssh-key-file" type="text" placeholder="/root/.ssh/id_ed25519">
+      </div>
     </div>
 
     <div id="reg-fields-local" style="display:none">
@@ -795,16 +878,22 @@
     <div class="form-row form-group">
       <div>
         <label class="form-label">Languages</label>
-        <div style="display:flex;gap:8px;padding:7px 0">
-          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text)">
-            <input type="checkbox" id="reg-lang-ts" value="ts" checked style="accent-color:var(--green)"> TypeScript
-          </label>
-          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text)">
-            <input type="checkbox" id="reg-lang-py" value="py" style="accent-color:var(--green)"> Python
-          </label>
-          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text)">
-            <input type="checkbox" id="reg-lang-c" value="c" style="accent-color:var(--green)"> C
-          </label>
+        <div class="multiselect" id="reg-lang-multiselect">
+          <div class="multiselect-trigger" tabindex="0" onclick="toggleLangDropdown(event)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleLangDropdown(event)">
+            <span class="multiselect-display" id="reg-lang-display">TypeScript</span>
+            <span class="multiselect-arrow">▾</span>
+          </div>
+          <div class="multiselect-options" id="reg-lang-options">
+            <label class="multiselect-option">
+              <input type="checkbox" value="ts" checked onchange="updateLangDisplay()"> TypeScript
+            </label>
+            <label class="multiselect-option">
+              <input type="checkbox" value="py" onchange="updateLangDisplay()"> Python
+            </label>
+            <label class="multiselect-option">
+              <input type="checkbox" value="c" onchange="updateLangDisplay()"> C
+            </label>
+          </div>
         </div>
       </div>
       <div>
@@ -989,6 +1078,23 @@
       <button class="btn-save" id="btn-save-llm" onclick="saveConfig('llm')">Save LLM</button>
       <div class="form-msg" id="cfg-llm-msg"></div>
     </div>
+  </div>
+
+  <div class="card settings-ssh-card">
+    <div class="settings-section-title">SSH Default Key</div>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:14px;">
+      Set a default SSH private key for all git operations. Applies immediately to future syncs.
+      Per-workspace keys set during registration take precedence.
+    </p>
+    <div class="form-group">
+      <label class="form-label">SSH Key File Path</label>
+      <div class="ssh-row">
+        <input class="form-input" id="cfg-ssh-key-file" type="text" placeholder="/root/.ssh/id_ed25519">
+        <button class="btn-apply-ssh" id="btn-apply-ssh" onclick="applySSHToAll()">Apply to all workspaces</button>
+        <button class="btn-save" id="btn-save-ssh" onclick="saveSSHDefault()" style="margin-top:0">Save Default</button>
+      </div>
+    </div>
+    <div class="form-msg" id="cfg-ssh-msg"></div>
   </div>
 </main>
 </div>
@@ -1485,6 +1591,86 @@
   // ── Register Workspace ────────────────────────────────────────────────────
   let regSrcType = 'gitlab';
 
+  // ── Language multi-select ─────────────────────────────────────────────────
+  function getLangSelections() {
+    return Array.from(
+      document.querySelectorAll('#reg-lang-options input[type="checkbox"]')
+    ).filter(cb => cb.checked).map(cb => cb.value);
+  }
+
+  function updateLangDisplay() {
+    const selected = getLangSelections();
+    const display = document.getElementById('reg-lang-display');
+    if (selected.length === 0) {
+      display.textContent = 'Select languages…';
+      display.classList.add('placeholder');
+    } else {
+      const labels = { ts: 'TypeScript', py: 'Python', c: 'C' };
+      display.textContent = selected.map(v => labels[v] || v).join(', ');
+      display.classList.remove('placeholder');
+    }
+  }
+
+  function toggleLangDropdown(e) {
+    e.stopPropagation();
+    document.getElementById('reg-lang-multiselect').classList.toggle('open');
+  }
+
+  document.addEventListener('click', (e) => {
+    const ms = document.getElementById('reg-lang-multiselect');
+    if (ms && !ms.contains(e.target)) ms.classList.remove('open');
+  });
+
+  // ── SSH helpers ───────────────────────────────────────────────────────────
+  async function applySSHToAll() {
+    const btn = document.getElementById('btn-apply-ssh');
+    const msg = document.getElementById('cfg-ssh-msg');
+    const sshKeyFile = document.getElementById('cfg-ssh-key-file').value.trim();
+    btn.disabled = true;
+    msg.textContent = '';
+    try {
+      const res  = await fetch('/api/workspaces/ssh', {
+        method: 'PATCH',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ sshKeyFile }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      msg.textContent = `✓ Applied to ${data.updated} workspace(s)`;
+      msg.className = 'form-msg ok';
+    } catch (e) {
+      msg.textContent = '✗ ' + e.message;
+      msg.className = 'form-msg err';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function saveSSHDefault() {
+    const btn = document.getElementById('btn-save-ssh');
+    const msg = document.getElementById('cfg-ssh-msg');
+    const sshKeyFile = document.getElementById('cfg-ssh-key-file').value.trim();
+    if (!sshKeyFile) { msg.textContent = 'Enter a key path to save.'; msg.className = 'form-msg'; return; }
+    btn.disabled = true;
+    msg.textContent = '';
+    try {
+      const res  = await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ sshKeyFile }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      msg.textContent = '✓ Default SSH key saved';
+      msg.className = 'form-msg ok';
+    } catch (e) {
+      msg.textContent = '✗ ' + e.message;
+      msg.className = 'form-msg err';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   function setSrcType(type) {
     regSrcType = type;
     document.getElementById('reg-fields-gitlab').style.display = type === 'gitlab' ? '' : 'none';
@@ -1505,7 +1691,7 @@
 
     if (!name) { msg.textContent = 'Name is required.'; msg.className = 'form-msg err'; return; }
 
-    const languages = ['ts','py','c'].filter(id => document.getElementById('reg-lang-'+id)?.checked);
+    const languages = getLangSelections();
     const omitRaw = document.getElementById('reg-omit').value.trim();
     const omit_patterns = omitRaw ? omitRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
 
@@ -1518,6 +1704,8 @@
       payload.gitlab_branch = document.getElementById('reg-branch').value.trim() || 'main';
       const token = document.getElementById('reg-token').value.trim();
       if (token) payload.gitlab_token = token;
+      const sshKeyFile = document.getElementById('reg-ssh-key-file').value.trim();
+      if (sshKeyFile) payload.ssh_key_file = sshKeyFile;
     } else {
       const dir = document.getElementById('reg-source-dir').value.trim();
       if (!dir) { msg.textContent = 'Source directory is required.'; msg.className = 'form-msg err'; return; }
@@ -1536,7 +1724,7 @@
       msg.textContent = `✓ Registered "${data.entry?.name || name}" — indexing started`;
       msg.className = 'form-msg ok';
       // Reset form
-      ['reg-name-gitlab','reg-name-local','reg-gitlab-url','reg-token','reg-source-dir','reg-omit'].forEach(id => {
+      ['reg-name-gitlab','reg-name-local','reg-gitlab-url','reg-token','reg-ssh-key-file','reg-source-dir','reg-omit'].forEach(id => {
         const el = document.getElementById(id); if (el) el.value = '';
       });
       document.getElementById('reg-branch').value = 'main';
@@ -1652,6 +1840,9 @@
       const llmBadge = document.getElementById('cfg-llm-key-badge');
       llmBadge.textContent = data.llmApiKeySet ? '✓ set' : 'not set';
       llmBadge.className   = 'key-set-badge ' + (data.llmApiKeySet ? 'set' : 'unset');
+
+      const sshEl = document.getElementById('cfg-ssh-key-file');
+      if (sshEl) sshEl.value = data.sshKeyFile || '';
     } catch (e) {
       console.error('Failed to load config', e);
     }

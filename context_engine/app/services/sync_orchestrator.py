@@ -41,6 +41,7 @@ class SyncOrchestrator:
             clone_dir=gitlab_config["cloneDir"],
             branch=gitlab_config["branch"],
             token=token,
+            ssh_key_file=entry.get("sshKeyFile"),
         )
         log("Fetch complete.")
 
