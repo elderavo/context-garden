@@ -95,13 +95,15 @@ def create_mcp_server(
             "notes": notes,
         })
 
-        parts: list[str] = []
-        for note in seed_notes + expanded_notes:
-            content = note.get("content", "").strip()
-            if content:
-                parts.append(content)
+        formatted = result.get("formattedContext", "")
+        if not formatted:
+            parts: list[str] = []
+            for note in seed_notes + expanded_notes:
+                content = note.get("content", "").strip()
+                if content:
+                    parts.append(content)
+            formatted = "\n\n---\n\n".join(parts)
 
-        formatted = "\n\n---\n\n".join(parts)
         budget = max(500, max_chars or DEFAULT_MAX_CHARS)
         if len(formatted) > budget:
             formatted = formatted[:budget] + "\n\n_(context truncated to fit budget)_\n<!-- End ContextGarden Context -->"
