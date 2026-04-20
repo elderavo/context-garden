@@ -232,7 +232,7 @@ def _llm_chat(
     """Call configured LLM provider and return the response content string."""
     provider = synth_config.get("provider", "ollama").lower()
     model = synth_config.get("model", "")
-    host = synth_config.get("host", "").rstrip("/")
+    host = synth_config.get("host", "").rstrip("/").removesuffix("/v1")
     api_key = synth_config.get("api_key", "")
     max_tokens = synth_config.get("max_tokens", 4096)
     temperature = 0.1
