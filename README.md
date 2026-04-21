@@ -1,216 +1,177 @@
 # ContextGarden
 
-A standalone MCP (Model Context Protocol) server that turns any directory of source code or markdown notes into a searchable knowledge graph. Connect it to your LLM client and call `retrieve_context` before answering any project-specific question.
+A self-hosted MCP server that turns GitLab repos into a searchable knowledge graph. Connect it to Claude Code (or any MCP client) and call `retrieve_context` before answering project-specific questions.
 
-Ships empty — workspaces are registered at runtime via MCP tools.
-
-
-## Future Goals
-repo understanding → law discovery → human ratification → continuous enforcement → repair loop
-
-Push all changes to a local LLM that audits changes against project design precepts and proposes fixes to keep the codebase in line. 
-
-Initial mode - read codebase via graph traversal and propose the existing design precepts and problem areas for human ratification
-Maintain mode - after initial pass, future diffs get queued up for review. Eventually agent should just ship PRs for change requests, and analyze past PRs for time-ordered trouble areas. 
-
-architecture_report.md
-design_rules.md
-violations.md
-drift_history.md
-
+Push to GitLab → webhook fires → ContextGarden git-pulls, re-mirrors, and reindexes automatically.
 
 ---
 
 ## How it works
 
-1. You register a source directory as a **workspace**.
-2. ContextGarden mirrors the source into structured markdown notes (`md_db/`).
-3. A file watcher keeps notes in sync as code changes.
-4. On query, a hybrid RAG pipeline retrieves relevant notes and synthesizes a context summary.
+1. You register a GitLab repo as a **workspace**.
+2. ContextGarden clones it and mirrors the source into structured markdown notes.
+3. A webhook keeps it in sync — every push triggers a git pull + reindex.
+4. On query, a hybrid RAG pipeline (vector + graph) retrieves relevant notes and synthesizes a context summary.
 5. Your LLM client receives the formatted context and answers with it.
 
 ---
 
-## Prerequisites
+## Requirements
 
-- **Node.js** 18+
-- **Conda** (for the Python knowledge graph backend)
-- An LLM provider (Ollama, OpenAI, or Anthropic)
-- An embedding provider (Ollama local or OpenAI)
+- Docker + Docker Compose
+- An embedding provider: **Ollama** (local, default) or OpenAI
+- An LLM provider: **Ollama**, OpenAI, or Anthropic
+- A GitLab instance (self-hosted or gitlab.com) with webhook support
 
 ---
 
-## Installation
+## Quick start
+
+### 1. Clone and configure
 
 ```bash
-# 1. Install Node dependencies
-npm install
-
-# 2. Create the Python environment
-conda env create -f graph/environment.yml
-
-# 3. (Optional) Verify the Python RPC server starts
-conda run -n contextgarden python -m graph
+git clone <this-repo>
+cd context_garden
+cp docker-compose.yml docker-compose.override.yml  # edit this, not the original
 ```
 
----
+Edit `docker-compose.override.yml` — at minimum, set your SSH key path:
 
-## Provider setup
+```yaml
+services:
+  context-garden:
+    volumes:
+      - ./data:/data
+      - /path/to/your/id_ed25519:/run/secrets/git_ssh_key:ro
+      - /path/to/your/known_hosts:/root/.ssh/known_hosts:ro
+    environment:
+      CG_GIT_SSH_COMMAND: "ssh -F /dev/null -i /run/secrets/git_ssh_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts"
+```
 
-### Ollama (default — fully local)
+If your GitLab runs on a non-standard SSH port (e.g. 2222), add `-p 2222` to the SSH command.
 
-The default configuration points to a local Ollama instance. No API keys needed.
+### 2. Start
 
 ```bash
-# Install Ollama: https://ollama.com
-ollama pull nomic-embed-text   # embeddings
-ollama pull cogito:8b          # synthesis LLM (swap for any model you prefer)
+sudo docker compose up -d
 ```
 
-Start the server with no extra config:
+The web UI is at **http://localhost:7433**.
+
+### 3. Configure providers
+
+Open the web UI → **Settings** tab. Set your embedding and LLM providers.
+
+**Ollama (local embeddings) + OpenAI (LLM)** — recommended:
+- Embed provider: `ollama`, model: `nomic-embed-text:latest`, host: `http://host.docker.internal:11434`
+- LLM provider: `openai`, model: `gpt-4o-mini`, API key: `sk-...`
+
+**Fully local (Ollama for both)**:
+- Embed: `ollama` / `nomic-embed-text:latest` / `http://host.docker.internal:11434`
+- LLM: `ollama` / `cogito:8b` (or any chat model) / `http://host.docker.internal:11434`
+
+Settings persist in the Docker volume — they survive container rebuilds.
+
+Pull Ollama models before first use:
+```bash
+ollama pull nomic-embed-text
+ollama pull cogito:8b   # or your preferred model
+```
+
+### 4. Connect Claude Code
 
 ```bash
-npx tsx bin/context-garden.ts --data-dir /path/to/your/data
+claude mcp add --transport http context-garden http://localhost:7433/mcp
 ```
 
----
-
-### OpenAI
-
-Set environment variables before starting:
-
+Verify:
 ```bash
-export OPENAI_API_KEY=sk-...
-export CG_EMBED_PROVIDER=openai
-export CG_EMBED_MODEL=text-embedding-3-small
-export CG_LLM_PROVIDER=openai
-export CG_LLM_MODEL=gpt-4o
-```
-
-Or write them to `.context-garden/config.json` in your data directory (see [Config file](#config-file)).
-
----
-
-### Anthropic
-
-Anthropic is supported for the **synthesis LLM only** (not embeddings — use Ollama or OpenAI for those).
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export CG_LLM_PROVIDER=anthropic
-export CG_LLM_MODEL=claude-sonnet-4-6
-
-# Still need an embed provider
-export OPENAI_API_KEY=sk-...
-export CG_EMBED_PROVIDER=openai
-export CG_EMBED_MODEL=text-embedding-3-small
+claude mcp list
 ```
 
 ---
 
-## Starting the server
+## Registering a workspace
 
-```bash
-# Default data directory = current working directory
-npx tsx bin/context-garden.ts
-
-# Explicit data directory
-npx tsx bin/context-garden.ts --data-dir /path/to/data
-
-# Via environment variable
-CG_DATA_DIR=/path/to/data npx tsx bin/context-garden.ts
+Via MCP (in Claude Code):
+```
+register_workspace(
+  name: "my-project",
+  gitlab_url: "git@gitlab.example.com:group/my-project.git",
+  branch: "master",
+  languages: ["ts", "py"]   # ts, py, or c
+)
 ```
 
-The server communicates over **stdio** (MCP standard). Connect it via your MCP client config.
+Or via the web UI → **Workspaces** tab → Register.
+
+Supported languages: `ts` (TypeScript/JavaScript), `py` (Python), `c` (C/C++)
+
+After registration, ContextGarden clones the repo, mirrors it into notes, and indexes everything. Check progress in the **Jobs** tab.
 
 ---
 
-## MCP client configuration
+## Webhook setup (auto-sync on push)
 
-### Claude Code / Claude Desktop
+In your GitLab repo → Settings → Webhooks:
 
-Add to your MCP config (`claude_desktop_config.json` or `.claude/mcp.json`):
+- **URL**: `http://<your-host>:7433/webhooks/gitlab`
+- **Secret token**: shown in the web UI after workspace registration (Workspaces tab)
+- **Trigger**: Push events
 
-```json
-{
-  "mcpServers": {
-    "context-garden": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/ContextGarden/bin/context-garden.ts", "--data-dir", "/path/to/data"],
-      "env": {
-        "CG_EMBED_PROVIDER": "ollama",
-        "CG_LLM_PROVIDER": "ollama"
-      }
-    }
-  }
-}
+Every push will now trigger a sync + reindex job visible in the Jobs tab.
+
+---
+
+## MCP tools
+
+| Tool | Description |
+|---|---|
+| `retrieve_context` | Hybrid RAG query — returns context from the knowledge graph |
+| `find_path` | Shortest path between two concepts |
+| `rate_context` | Rate a result to improve future queries |
+| `register_workspace` | Register a GitLab repo |
+| `list_workspaces` | List registered workspaces |
+| `unregister_workspace` | Remove a workspace and its indexed notes |
+| `configure` | View or update embed/LLM config (`persist=true` saves to disk) |
+| `setup` | One-shot provider setup wizard |
+
+### Querying
+
 ```
-
-For OpenAI:
-
-```json
-{
-  "mcpServers": {
-    "context-garden": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/ContextGarden/bin/context-garden.ts", "--data-dir", "/path/to/data"],
-      "env": {
-        "OPENAI_API_KEY": "sk-...",
-        "CG_EMBED_PROVIDER": "openai",
-        "CG_EMBED_MODEL": "text-embedding-3-small",
-        "CG_LLM_PROVIDER": "openai",
-        "CG_LLM_MODEL": "gpt-4o"
-      }
-    }
-  }
-}
-```
-
-For Anthropic synthesis + OpenAI embeddings:
-
-```json
-{
-  "mcpServers": {
-    "context-garden": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/ContextGarden/bin/context-garden.ts", "--data-dir", "/path/to/data"],
-      "env": {
-        "ANTHROPIC_API_KEY": "sk-ant-...",
-        "OPENAI_API_KEY": "sk-...",
-        "CG_EMBED_PROVIDER": "openai",
-        "CG_EMBED_MODEL": "text-embedding-3-small",
-        "CG_LLM_PROVIDER": "anthropic",
-        "CG_LLM_MODEL": "claude-sonnet-4-6"
-      }
-    }
-  }
-}
+retrieve_context(
+  query: "how does authentication work?",
+  workspace: "my-project",   // optional — omit to search all
+  max_chars: 15000
+)
 ```
 
 ---
 
-## Config file
+## Web UI
 
-You can persist configuration to `<data-dir>/.context-garden/config.json`:
+**http://localhost:7433**
 
-```json
-{
-  "embedding": {
-    "provider": "openai",
-    "model": "text-embedding-3-small",
-    "host": "https://api.openai.com",
-    "apiKey": "sk-..."
-  },
-  "synthesizer": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-6",
-    "host": "https://api.anthropic.com",
-    "apiKey": "sk-ant-..."
-  }
-}
+- **Workspaces** — register repos, trigger manual sync/reindex, view webhook secrets
+- **Jobs** — live job queue with logs for every sync and index run
+- **Settings** — configure embedding and LLM providers (persisted to Docker volume)
+
+---
+
+## Data directory layout
+
 ```
-
-Config cascade (last wins): **defaults → config.json → env vars → `configure` tool at runtime**
+data/
+  md_db/
+    code/
+      <workspace-name>/     ← mirrored notes
+  .context-garden/
+    config.json             ← provider config
+    workspaces.json         ← workspace registry
+    secrets.env             ← API keys (never committed)
+    knowledge_graph/        ← LlamaIndex vector + graph index
+    clones/                 ← git clones of registered repos
+```
 
 ---
 
@@ -218,108 +179,36 @@ Config cascade (last wins): **defaults → config.json → env vars → `configu
 
 | Variable | Description | Default |
 |---|---|---|
-| `CG_DATA_DIR` | Data directory override | `cwd` |
-| `CG_EMBED_PROVIDER` | Embedding provider: `ollama`, `openai`, `local` | `ollama` |
-| `CG_EMBED_MODEL` | Embedding model name | `nomic-embed-text:latest` |
-| `CG_EMBED_HOST` | Embedding provider host URL | `http://localhost:11434` |
-| `CG_EMBED_API_KEY` | Embedding API key | — |
-| `CG_LLM_PROVIDER` | LLM provider: `ollama`, `openai`, `anthropic` | `ollama` |
-| `CG_LLM_MODEL` | LLM model name | `cogito:8b` |
-| `CG_LLM_HOST` | LLM provider host URL | `http://localhost:11434` |
-| `CG_LLM_API_KEY` | LLM API key | — |
-| `OPENAI_API_KEY` | OpenAI key (fallback for embed + LLM) | — |
-| `ANTHROPIC_API_KEY` | Anthropic key (fallback for LLM) | — |
-| `CG_GIT_SSH_COMMAND` | Full override for SSH command used by git (advanced) | auto |
-| `CG_GIT_SSH_KNOWN_HOSTS_FILE` | Writable known_hosts file path for Git SSH operations | `<clone-parent>/known_hosts` |
-| `CG_GIT_SSH_KEY_FILE` | Private key file path to pass as `ssh -i` for Git SSH operations | — |
+| `CG_WEBAPP_PORT` | HTTP port | `7433` |
+| `CG_GIT_SSH_COMMAND` | Full SSH command override for git | auto |
+| `CG_GITLAB_TOKEN` | Fallback GitLab access token (if not per-workspace) | — |
 
----
-
-## MCP tools
-
-Once connected, your LLM client has access to 7 tools:
-
-| Tool | Description |
-|---|---|
-| `retrieve_context` | Hybrid RAG query — returns markdown-formatted context from the knowledge graph |
-| `find_path` | Shortest path between two concepts in the knowledge graph |
-| `rate_context` | Rate a retrieval result to improve future queries |
-| `register_workspace` | Register a source directory for mirroring + indexing |
-| `list_workspaces` | List all registered workspaces and their status |
-| `unregister_workspace` | Stop watcher, delete mirrored notes, remove workspace |
-| `configure` | View or update embed/LLM config at runtime; `persist=true` saves to config.json |
-
-### Registering a workspace
-
-```
-register_workspace(
-  name: "my-project",
-  source_dir: "/absolute/path/to/my-project",
-  languages: ["typescript"]   // or: "python", "c"
-)
-```
-
-Supported languages: `typescript`, `python`, `c`
-
-After registration, mirrored notes appear in `<data-dir>/md_db/code/my-project/`.
-
-### Querying context
-
-```
-retrieve_context(
-  query: "how does authentication work?",
-  workspace: "my-project",   // optional — omit to search all workspaces
-  max_chars: 15000           // optional
-)
-```
-
-### Runtime reconfiguration
-
-```
-configure(
-  llm_provider: "anthropic",
-  llm_model: "claude-opus-4-6",
-  persist: true
-)
-```
-
----
-
-## Data directory layout
-
-```
-<data-dir>/
-  md_db/
-    code/
-      <workspace-name>/     ← mirrored notes per workspace
-  .context-garden/
-    config.json             ← persisted config (optional)
-    workspaces.json         ← workspace registry
-    knowledge_graph/        ← LlamaIndex vector + graph index
-```
+Provider config (embed host, model, API keys) is managed via the Settings UI or `configure` MCP tool — not env vars.
 
 ---
 
 ## Troubleshooting
 
-**Python subprocess fails to start**
-- Verify the conda env exists: `conda env list | grep contextgarden`
-- Recreate if missing: `conda env create -f graph/environment.yml`
-- Test manually: `conda run -n contextgarden python -m graph`
-
 **No results from `retrieve_context`**
-- Check that a workspace is registered: call `list_workspaces`
-- Indexing runs in the background after `register_workspace` — wait a moment for large codebases
-- Verify Ollama is running (default provider): `curl http://localhost:11434/api/tags`
+- Check that a workspace is registered: `list_workspaces`
+- Indexing runs in background — check the Jobs tab for progress
+- Verify Ollama is reachable: `curl http://localhost:11434/api/tags` (from the host)
+- If running Ollama on the host, use `http://host.docker.internal:11434` as the embed host
 
-**Embedding model not found (Ollama)**
-- Pull the model: `ollama pull nomic-embed-text`
+**Webhook not triggering sync**
+- Confirm the secret token in GitLab matches the one shown in the Workspaces tab
+- Check the container logs: `sudo docker compose logs -f`
+- GitLab must be able to reach your host on port 7433
 
-**Wrong model for synthesis**
-- Use `configure(llm_model: "...", persist: true)` or set `CG_LLM_MODEL` env var
+**SSH / git pull fails**
+- Verify the key is mounted and readable: `sudo docker compose exec context-garden ls -la /run/secrets/git_ssh_key`
+- Test SSH from inside the container: `sudo docker compose exec context-garden ssh -i /run/secrets/git_ssh_key -T git@your-gitlab-host`
+- Ensure `known_hosts` contains your GitLab host's fingerprint
 
-**GitLab sync over SSH fails (`known_hosts` / `publickey`)**
-- Use a reachable repo host in `gitlab_url` (for example: `git@10.0.132.100:group/repo`)
-- If `known_hosts` is not writable, set `CG_GIT_SSH_KNOWN_HOSTS_FILE` to a writable file path
-- If key auth fails, set `CG_GIT_SSH_KEY_FILE` to the private key path and verify with:
-  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T git@10.0.132.100`
+**Embedding model not loaded**
+- On first query, Ollama pulls the model — this can take a minute
+- Check: `ollama ps` on the host
+
+**Settings not saving**
+- Ensure the `./data` volume directory is writable
+- Check logs: `sudo docker compose logs context-garden`

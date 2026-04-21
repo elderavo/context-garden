@@ -578,6 +578,12 @@ class KnowledgeGraphEngine:
         current_mtimes = _scan_workspace_mtimes(self.md_db_path)
         changed_paths, deleted_paths = _diff_manifest(current_mtimes, manifest)
 
+        if force:
+            current_paths = set(current_mtimes.keys())
+            cached_paths = set(self._parsed_notes.keys())
+            changed_paths = sorted(current_paths)
+            deleted_paths = sorted(set(deleted_paths) | (cached_paths - current_paths))
+
         if not force and not changed_paths and not deleted_paths:
             return {
                 "skipped": True,
@@ -585,10 +591,6 @@ class KnowledgeGraphEngine:
                 "note_count": len(self._parsed_notes),
                 "note_cache": self.note_cache,
             }
-
-        if force and not changed_paths and not deleted_paths:
-            # Manifest says nothing changed but force=True — treat every file as changed
-            changed_paths = list(_scan_workspace_mtimes(self.md_db_path).keys())
 
         result = self.incremental_update(
             changed_paths=changed_paths,

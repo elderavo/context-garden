@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +24,7 @@ class SyncOrchestrator:
     git_client: GitClient
     mirror_service: MirrorService
     indexer_service: IndexerService
+    data_dir: Path | None = None
 
     async def execute_sync(self, *, job: Any, log: Callable[[str], None]) -> None:
         entry = self.workspace_repository.get_by_id(job.workspace_id)
@@ -59,16 +61,19 @@ class SyncOrchestrator:
             raise RuntimeError(f"Mirror failed: {mirror_error}")
 
     async def execute_rebuild(self, *, job: Any, log: Callable[[str], None]) -> None:
-        """Force-regenerate all notes (bypasses mtime guard) then reindex."""
+        """Delete generated workspace data, then regenerate notes and index."""
         entry = self.workspace_repository.get_by_id(job.workspace_id)
         if not entry:
             raise KeyError(f"Workspace {job.workspace_id} not found in registry")
 
         mirror_config = entry.get("gitlabConfig") or {"cloneDir": entry["sourceDir"]}
 
-        log("Force-mirroring (bypassing mtime guard)...")
+        if self.data_dir is not None:
+            self._reset_generated_workspace_data(entry=entry, log=log)
+
+        log("Mirroring from empty workspace data...")
         try:
-            result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=mirror_config, force=True)
+            result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=mirror_config)
             written = sum(result.get("written", {}).values()) if isinstance(result.get("written"), dict) else 0
             log(f"Mirror complete. Notes written: {written}.")
         except Exception as exc:
@@ -77,6 +82,22 @@ class SyncOrchestrator:
         log("Triggering force reindex...")
         await self.indexer_service.trigger_reindex(workspace_name=job.workspace_name, force=True)
         log("Rebuild complete.")
+
+    def _reset_generated_workspace_data(self, *, entry: dict[str, Any], log: Callable[[str], None]) -> None:
+        """Clear generated markdown and persisted index/cache for one workspace."""
+        assert self.data_dir is not None
+        data_dir = self.data_dir.resolve()
+        workspace_name = entry["name"]
+        workspace_id = entry["id"]
+
+        mirror_dir = data_dir / "md_db" / "code" / workspace_name
+        index_root = data_dir / ".context-garden" / "knowledge_graph" / workspace_id
+
+        log("Clearing generated workspace data...")
+        self._clear_directory_contents(mirror_dir, data_dir)
+        if index_root.exists():
+            self._remove_path_under_data_dir(index_root, data_dir)
+        (index_root / "index").mkdir(parents=True, exist_ok=True)
 
     async def execute_index(self, *, job: Any, log: Callable[[str], None]) -> None:
         log("Triggering daemon reindex...")
@@ -101,6 +122,30 @@ class SyncOrchestrator:
                     return value or None
         return None
 
+    @staticmethod
+    def _clear_directory_contents(path: Path, data_dir: Path) -> None:
+        resolved = path.resolve()
+        SyncOrchestrator._assert_under_data_dir(resolved, data_dir)
+        resolved.mkdir(parents=True, exist_ok=True)
+        for child in resolved.iterdir():
+            SyncOrchestrator._remove_path_under_data_dir(child, data_dir)
+
+    @staticmethod
+    def _remove_path_under_data_dir(path: Path, data_dir: Path) -> None:
+        resolved = path.resolve()
+        SyncOrchestrator._assert_under_data_dir(resolved, data_dir)
+        if resolved.is_dir() and not resolved.is_symlink():
+            shutil.rmtree(resolved)
+        else:
+            resolved.unlink(missing_ok=True)
+
+    @staticmethod
+    def _assert_under_data_dir(path: Path, data_dir: Path) -> None:
+        try:
+            path.relative_to(data_dir)
+        except ValueError as exc:
+            raise RuntimeError(f"Refusing to delete path outside data dir: {path}") from exc
+
 
 def build_default(
     *,
@@ -118,4 +163,5 @@ def build_default(
             mirror_cli=mirror_cli,
         ),
         indexer_service=DaemonIndexerService(get_daemon),
+        data_dir=data_dir,
     )
