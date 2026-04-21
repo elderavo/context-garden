@@ -583,6 +583,7 @@ class _DaemonServer:
     def handle_index_rebuild(self, params: dict[str, Any]) -> dict[str, Any]:
         workspace_id = params.get("workspace_id")
         name = params.get("name")
+        force = bool(params.get("force", False))
         with self._lock:
             if workspace_id:
                 targets = [self._runtimes[workspace_id]] if workspace_id in self._runtimes else []
@@ -602,7 +603,7 @@ class _DaemonServer:
             rt.state = "indexing"
             try:
                 with rt._engine_lock:
-                    rt.engine.reindex()
+                    rt.engine.reindex(force=force)
                     rt.last_indexed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 total_docs += rt.doc_count
             except Exception as exc:

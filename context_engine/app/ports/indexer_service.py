@@ -6,6 +6,6 @@ from typing import Protocol
 class IndexerService(Protocol):
     """Indexer enqueue/trigger operations for sync workflows."""
 
-    async def trigger_reindex(self, *, workspace_name: str) -> None:
+    async def trigger_reindex(self, *, workspace_name: str, force: bool = False) -> None:
         ...
 

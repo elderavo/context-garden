@@ -74,8 +74,8 @@ class SyncOrchestrator:
         except Exception as exc:
             raise RuntimeError(f"Mirror failed: {exc}") from exc
 
-        log("Triggering reindex...")
-        await self.indexer_service.trigger_reindex(workspace_name=job.workspace_name)
+        log("Triggering force reindex...")
+        await self.indexer_service.trigger_reindex(workspace_name=job.workspace_name, force=True)
         log("Rebuild complete.")
 
     async def execute_index(self, *, job: Any, log: Callable[[str], None]) -> None:

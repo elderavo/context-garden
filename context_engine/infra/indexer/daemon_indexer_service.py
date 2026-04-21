@@ -10,7 +10,7 @@ class DaemonIndexerService:
     def __init__(self, get_daemon: Callable[[], Any]) -> None:
         self._get_daemon = get_daemon
 
-    async def trigger_reindex(self, *, workspace_name: str) -> None:
+    async def trigger_reindex(self, *, workspace_name: str, force: bool = False) -> None:
         daemon = self._get_daemon()
-        await asyncio.to_thread(daemon.handle_index_rebuild, {"name": workspace_name})
+        await asyncio.to_thread(daemon.handle_index_rebuild, {"name": workspace_name, "force": force})
 

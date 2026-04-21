@@ -551,12 +551,14 @@ class KnowledgeGraphEngine:
     # Reindex
     # ------------------------------------------------------------------
 
-    def reindex(self) -> dict[str, Any]:
+    def reindex(self, force: bool = False) -> dict[str, Any]:
         """Diff workspace against manifest and apply any changes.
 
         Replaces the old full-content-hash approach: uses mtime/size manifest
         for O(scandir) change detection, then incremental_update for changed files.
         Falls back to a full rebuild if the engine has no in-memory state.
+
+        force=True: nuke all cached hashes and re-embed every note unconditionally.
         """
         if not self.md_db_path:
             raise RuntimeError("Engine not initialized")
@@ -567,18 +569,26 @@ class KnowledgeGraphEngine:
             # No in-memory state — treat as first boot
             return self._initialize_slow(self.embed_model, t0)
 
+        if force:
+            # Wipe cached hashes so incremental_update re-embeds everything
+            self._note_hashes.clear()
+
         # Diff workspace against persisted manifest
         manifest = _load_manifest(self.db_dir)
         current_mtimes = _scan_workspace_mtimes(self.md_db_path)
         changed_paths, deleted_paths = _diff_manifest(current_mtimes, manifest)
 
-        if not changed_paths and not deleted_paths:
+        if not force and not changed_paths and not deleted_paths:
             return {
                 "skipped": True,
                 "duration_ms": int((time.time() - t0) * 1000),
                 "note_count": len(self._parsed_notes),
                 "note_cache": self.note_cache,
             }
+
+        if force and not changed_paths and not deleted_paths:
+            # Manifest says nothing changed but force=True — treat every file as changed
+            changed_paths = list(_scan_workspace_mtimes(self.md_db_path).keys())
 
         result = self.incremental_update(
             changed_paths=changed_paths,
@@ -597,6 +607,7 @@ class KnowledgeGraphEngine:
         changed_paths: list[str],
         deleted_paths: list[str],
         progress_cb: Optional[Callable[[int, int], None]] = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         """Update only the notes that changed/were added/deleted.
 
@@ -659,8 +670,8 @@ class KnowledgeGraphEngine:
             frontmatter, body = parse_frontmatter(content)
             new_hash = _content_hash(body)
 
-            # Skip if content hasn't actually changed
-            if rel_path in self._note_hashes and self._note_hashes[rel_path] == new_hash:
+            # Skip if content hasn't actually changed (bypassed when force=True)
+            if not force and rel_path in self._note_hashes and self._note_hashes[rel_path] == new_hash:
                 if progress_cb:
                     progress_cb(_idx + 1, total_changed)
                 continue
