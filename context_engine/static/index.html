@@ -621,6 +621,168 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* ── Retrieve v2 ────────────────────────────────────────────────────── */
+    .ret-layout {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+    @media (max-width: 820px) { .ret-layout { grid-template-columns: 1fr; } }
+
+    .ret-notes-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      position: sticky;
+      top: 108px;
+      max-height: calc(100vh - 130px);
+      display: flex;
+      flex-direction: column;
+    }
+    .ret-notes-scroll { overflow-y: auto; flex: 1; }
+    .ret-notes-scroll::-webkit-scrollbar { width: 4px; }
+    .ret-notes-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .ret-panel-hdr {
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .ret-panel-hdr-count { color: var(--dim); font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+    .ret-section-sep {
+      padding: 5px 14px 3px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .ret-section-sep.seed     { color: rgba(88,166,255,0.7); }
+    .ret-section-sep.expanded { color: rgba(188,140,255,0.7); }
+
+    .ret-nc {
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.1s;
+      border-left: 2px solid transparent;
+    }
+    .ret-nc:hover   { background: var(--raised); }
+    .ret-nc.active  { background: rgba(88,166,255,0.05); }
+    .ret-nc.seed     { border-left-color: rgba(88,166,255,0.45); }
+    .ret-nc.expanded { border-left-color: rgba(188,140,255,0.45); }
+
+    .ret-nc-row1 { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
+    .ret-nc-title {
+      font-size: 11px; font-weight: 600; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+    }
+    .ret-nc-score          { font-size: 11px; font-weight: 700; flex-shrink: 0; }
+    .ret-nc-score.seed     { color: var(--blue); }
+    .ret-nc-score.expanded { color: var(--purple); }
+
+    .ret-nc-row2 { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+    .ret-tier {
+      padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 700;
+      background: var(--raised); border: 1px solid var(--border); color: var(--dim);
+    }
+    .ret-nc-via {
+      font-size: 10px; color: var(--purple); margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ret-nc-body {
+      display: none; margin-top: 7px; padding: 7px 9px;
+      background: var(--bg); border-radius: 4px; border: 1px solid var(--border);
+      font-size: 10px; color: var(--dim); line-height: 1.7;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 160px; overflow-y: auto;
+    }
+    .ret-nc-body.open { display: block; }
+    .ret-nc-body::-webkit-scrollbar { width: 3px; }
+    .ret-nc-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* Output panel */
+    .ret-out-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .ret-out-tabs  { display: flex; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--border); }
+    .ret-out-tab {
+      padding: 9px 14px; font-size: 11px; font-family: inherit; font-weight: 500;
+      color: var(--muted); background: none; border: none;
+      border-bottom: 2px solid transparent; margin-bottom: -1px;
+      cursor: pointer; transition: color 0.15s; letter-spacing: 0.02em;
+    }
+    .ret-out-tab:hover  { color: var(--text); }
+    .ret-out-tab.active { color: var(--text); border-bottom-color: var(--green); }
+    .ret-out-tab:active { transform: none; opacity: 1; }
+    .ret-copy {
+      padding: 3px 10px; background: rgba(88,166,255,0.08); color: var(--blue);
+      border: 1px solid rgba(88,166,255,0.2); border-radius: 4px;
+      font-size: 10px; font-family: inherit; font-weight: 600;
+      cursor: pointer; letter-spacing: 0.04em; transition: background 0.15s;
+    }
+    .ret-copy:hover  { background: rgba(88,166,255,0.15); opacity: 1; }
+    .ret-copy:active { transform: scale(0.97); }
+
+    .ret-out-body { max-height: calc(100vh - 220px); overflow-y: auto; }
+    .ret-out-body::-webkit-scrollbar { width: 5px; }
+    .ret-out-body::-webkit-scrollbar-track { background: transparent; }
+    .ret-out-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* Markdown rendering */
+    .md-root { padding: 16px 20px; }
+    .md-comment { font-size: 10px; color: var(--muted); margin-bottom: 6px; font-style: italic; }
+    .md-h1 {
+      font-size: 15px; font-weight: 700; color: var(--text);
+      margin: 14px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+    }
+    .md-h2 {
+      font-size: 10px; font-weight: 700; color: var(--orange);
+      letter-spacing: 0.1em; text-transform: uppercase; margin: 20px 0 6px;
+    }
+    .md-h3 {
+      font-size: 12px; font-weight: 600; color: var(--blue);
+      margin: 12px 0 2px; line-height: 1.4; border-radius: 4px;
+      transition: background 0.3s;
+    }
+    .md-h3.hl { background: rgba(88,166,255,0.12); padding: 2px 6px; margin-left: -6px; }
+    .md-p    { font-size: 12px; color: var(--text); line-height: 1.75; margin-bottom: 1px; }
+    .md-em   { color: var(--muted); font-style: italic; }
+    .md-code { font-family: inherit; background: var(--raised); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 11px; }
+    .md-gap  { height: 6px; }
+
+    /* Graph view */
+    .ret-graph-inner { padding: 16px 20px; }
+    .graph-empty { font-size: 11px; color: var(--muted); font-style: italic; }
+    .graph-path-section { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+    .graph-path-label {
+      font-size: 9px; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+    }
+    .graph-path-chain {
+      display: flex; align-items: center; flex-wrap: wrap;
+      gap: 4px; margin-bottom: 8px; font-size: 10px;
+    }
+    .graph-chain-node {
+      padding: 2px 8px; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--raised);
+      color: var(--text); white-space: nowrap;
+      max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+    }
+    .graph-chain-node.seed-node { border-color: rgba(88,166,255,0.3); color: var(--blue); }
+    .graph-chain-edge { font-size: 10px; color: var(--muted); white-space: nowrap; }
+    .graph-meta { font-size: 10px; color: var(--muted); margin-top: 10px; font-style: italic; }
+
     /* ── Settings tab ────────────────────────────────────────────────────── */
     .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
     @media (max-width: 700px) { .settings-grid { grid-template-columns: 1fr; } }
@@ -1006,12 +1168,12 @@
 <!-- ════════════════════════════ RETRIEVE ════════════════════════════════ -->
 <div id="panel-retrieve" class="tab-panel">
 <main>
-  <div class="card" style="margin-bottom:16px">
-    <div class="card-title">Test Retrieval</div>
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-title">Query</div>
     <div class="retrieve-top">
       <div>
         <label class="form-label">Query</label>
-        <textarea class="form-input" id="ret-query" rows="3" placeholder="Enter a query to test retrieval…"></textarea>
+        <textarea class="form-input" id="ret-query" rows="2" placeholder="Enter a query… (Ctrl+Enter to run)"></textarea>
       </div>
       <div>
         <label class="form-label">Workspace</label>
@@ -1756,6 +1918,204 @@
     }
   }
 
+  // ── Retrieve v2 helpers ───────────────────────────────────────────────────
+  let _retData      = null;
+  let _retActiveTab = 'fmt';
+
+  function switchRetTab(tab, btn) {
+    _retActiveTab = tab;
+    document.getElementById('ret-fmt-panel').style.display   = tab === 'fmt'   ? '' : 'none';
+    document.getElementById('ret-graph-panel').style.display = tab === 'graph' ? '' : 'none';
+    document.querySelectorAll('.ret-out-tab').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+  }
+
+  function copyContext() {
+    if (!_retData?.formattedContext) return;
+    navigator.clipboard.writeText(_retData.formattedContext).then(() => {
+      const btn = document.getElementById('ret-copy-btn');
+      if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); }
+    });
+  }
+
+  function toggleNoteCard(cardEl, safeId) {
+    const body = document.getElementById('ncb-' + safeId);
+    if (!body) return;
+    const opening = !body.classList.contains('open');
+    body.classList.toggle('open', opening);
+    cardEl.classList.toggle('active', opening);
+    if (opening) highlightNoteInFormatted(safeId);
+  }
+
+  function highlightNoteInFormatted(safeId) {
+    const el = document.getElementById('mdh-' + safeId);
+    if (!el) return;
+    const fmtBtn = document.querySelector('.ret-out-tab[data-retab="fmt"]');
+    if (fmtBtn && _retActiveTab !== 'fmt') switchRetTab('fmt', fmtBtn);
+    const panel = document.getElementById('ret-fmt-panel');
+    if (panel) panel.scrollTop = el.offsetTop - 40;
+    el.classList.add('hl');
+    setTimeout(() => el.classList.remove('hl'), 2000);
+  }
+
+  // ── Markdown renderer ─────────────────────────────────────────────────────
+  function inlineMd(s) {
+    return s
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(?<![_\w])_([^_\n]+)_(?![_\w])/g, '<em class="md-em">$1</em>')
+      .replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+  }
+
+  function md2html(text, pathToId) {
+    return text.split('\n').map(line => {
+      if (/^<!--/.test(line))  return `<div class="md-comment">${esc(line)}</div>`;
+      if (/^### /.test(line)) {
+        const raw     = line.slice(4);
+        const pathRaw = raw.split(' (')[0].replace(/\s+\[[^\]]+\]$/, '').trim();
+        const nid     = (pathToId || {})[pathRaw] || '';
+        const safeId  = nid.replace(/[^a-zA-Z0-9_-]/g, '-');
+        const idAttr  = safeId ? ` id="mdh-${safeId}"` : '';
+        return `<h3 class="md-h3"${idAttr}>${inlineMd(esc(raw))}</h3>`;
+      }
+      if (/^## /.test(line))  return `<h2 class="md-h2">${inlineMd(esc(line.slice(3)))}</h2>`;
+      if (/^# /.test(line))   return `<h1 class="md-h1">${inlineMd(esc(line.slice(2)))}</h1>`;
+      if (!line.trim())        return '<div class="md-gap"></div>';
+      return `<p class="md-p">${inlineMd(esc(line))}</p>`;
+    }).join('\n');
+  }
+
+  // ── SVG path graph ────────────────────────────────────────────────────────
+  function svgEsc(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0,n-1)+'…' : s; }
+
+  const _EDGE_LABELS = {CALLS:'calls',IMPORTS:'imports',CONTAINS_SYMBOL:'contains',
+    LINKS_TO:'links to',BELONGS_TO:'belongs to',DEFINED_IN:'defined in',CONTAINS:'contains'};
+  function edgeLabel(e) { return e ? (_EDGE_LABELS[e] || e.toLowerCase()) : ''; }
+
+  function renderPathGraph(seeds, expanded, pathTraces) {
+    const NW=195, NH=46, GAP=12, CGAP=130, PAD=16, TOPPAD=24;
+    const maxS = Math.min(seeds.length, 7);
+    const maxE = Math.min(expanded.length, 10);
+    const ds = seeds.slice(0, maxS);
+    const de = expanded.slice(0, maxE);
+
+    if (ds.length === 0 && de.length === 0) {
+      return '<p class="graph-empty">No notes to display.</p>';
+    }
+
+    const rowH  = (n) => n * NH + Math.max(0, n-1) * GAP;
+    const mainH = Math.max(rowH(ds.length), rowH(de.length));
+    const svgH  = TOPPAD + mainH + PAD;
+    const svgW  = PAD + NW + CGAP + NW + PAD;
+    const sy    = (i) => TOPPAD + i * (NH + GAP);
+    const SX    = PAD, EX = PAD + NW + CGAP;
+
+    // seed lookup
+    const seedByTitle = {};
+    ds.forEach((n,i) => { seedByTitle[n.title || ''] = i; });
+
+    let o = [];
+    o.push(`<svg viewBox="0 0 ${svgW} ${svgH}" style="display:block;width:100%;min-height:${svgH}px" font-family="'SF Mono','Cascadia Code','Consolas',monospace">`);
+
+    // arrowhead markers
+    o.push(`<defs>
+      <marker id="ah-pu" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+        <path d="M0,0.5 L0,5.5 L7,3z" fill="rgba(188,140,255,0.75)"/>
+      </marker>
+      <marker id="ah-gr" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+        <path d="M0,0.5 L0,5.5 L7,3z" fill="rgba(63,185,80,0.65)"/>
+      </marker>
+    </defs>`);
+
+    // column labels
+    if (ds.length) o.push(`<text x="${SX}" y="${TOPPAD-8}" fill="rgba(88,166,255,0.65)" font-size="9" font-weight="700" letter-spacing="0.12em">SEEDS</text>`);
+    if (de.length) o.push(`<text x="${EX}" y="${TOPPAD-8}" fill="rgba(188,140,255,0.65)" font-size="9" font-weight="700" letter-spacing="0.12em">GRAPH-EXPANDED</text>`);
+
+    // edges: expanded → its seed source
+    de.forEach((n, ei) => {
+      const si = seedByTitle[n.viaSourceTitle ?? ''];
+      if (si == null) return;
+      const x1 = SX+NW, y1 = sy(si)+NH/2;
+      const x2 = EX,    y2 = sy(ei)+NH/2;
+      const cpx = (x1+x2)/2;
+      const lbl = edgeLabel(n.viaEdge);
+      const midX = (x1+x2)/2, midY = Math.min(y1,y2) + Math.abs(y2-y1)/2 - 8;
+      o.push(`<path d="M${x1},${y1} C${cpx},${y1} ${cpx},${y2} ${x2},${y2}"
+        fill="none" stroke="rgba(188,140,255,0.28)" stroke-width="1.5"
+        marker-end="url(#ah-pu)"/>`);
+      if (lbl) o.push(`<text x="${midX}" y="${midY}" fill="rgba(125,133,144,0.85)" font-size="9" text-anchor="middle">${svgEsc(lbl)}</text>`);
+    });
+
+    // seed nodes
+    ds.forEach((n, i) => {
+      const x=SX, y=sy(i);
+      const title = trunc(n.title || n.path?.split('/').pop() || '—', 24);
+      const score = typeof n.score === 'number' ? n.score.toFixed(3) : '—';
+      const sub   = [n.tier ? 'T'+n.tier : null, n.workspace].filter(Boolean).join(' · ');
+      o.push(`<rect x="${x}" y="${y}" width="${NW}" height="${NH}" rx="5"
+        fill="rgba(88,166,255,0.06)" stroke="rgba(88,166,255,0.38)" stroke-width="1.5"/>`);
+      o.push(`<text x="${x+10}" y="${y+17}" fill="#e6edf3" font-size="11" font-weight="600">${svgEsc(title)}</text>`);
+      o.push(`<text x="${x+10}" y="${y+33}" fill="#7d8590" font-size="10">${svgEsc(sub)}</text>`);
+      o.push(`<text x="${x+NW-8}" y="${y+17}" fill="rgba(88,166,255,0.9)" font-size="11" font-weight="700" text-anchor="end">${svgEsc(score)}</text>`);
+    });
+
+    // expanded nodes
+    de.forEach((n, i) => {
+      const x=EX, y=sy(i);
+      const title = trunc(n.title || n.path?.split('/').pop() || '—', 24);
+      const score = typeof n.score === 'number' ? n.score.toFixed(3) : '—';
+      const sub   = [n.tier ? 'T'+n.tier : null, n.workspace].filter(Boolean).join(' · ');
+      o.push(`<rect x="${x}" y="${y}" width="${NW}" height="${NH}" rx="5"
+        fill="rgba(188,140,255,0.06)" stroke="rgba(188,140,255,0.38)" stroke-width="1.5"/>`);
+      o.push(`<text x="${x+10}" y="${y+17}" fill="#e6edf3" font-size="11" font-weight="600">${svgEsc(title)}</text>`);
+      o.push(`<text x="${x+10}" y="${y+33}" fill="#7d8590" font-size="10">${svgEsc(sub)}</text>`);
+      o.push(`<text x="${x+NW-8}" y="${y+17}" fill="rgba(188,140,255,0.9)" font-size="11" font-weight="700" text-anchor="end">${svgEsc(score)}</text>`);
+    });
+
+    o.push('</svg>');
+
+    // inter-seed path chains (HTML below SVG)
+    let pathHtml = '';
+    if (pathTraces?.length) {
+      const noteMap = {};
+      [...seeds, ...expanded].forEach(n => { noteMap[n.noteId] = n; });
+
+      const chains = pathTraces.map(trace => {
+        const startN  = noteMap[trace.startId];
+        const endN    = noteMap[trace.endId];
+        const isSeed  = (id) => seeds.some(s => s.noteId === id);
+        const lbl     = (n, id) => trunc(n?.title || id, 22);
+
+        let parts = [`<span class="graph-chain-node${isSeed(trace.startId)?' seed-node':''}">${esc(lbl(startN, trace.startId))}</span>`];
+        const steps = trace.steps || [];
+        steps.forEach(step => {
+          const el  = edgeLabel(step.edgeLabel);
+          const dir = step.edgeDirection === 'incoming' ? '←' : '→';
+          if (el) parts.push(`<span class="graph-chain-edge">${dir}[${esc(el)}]${dir}</span>`);
+          const sn = noteMap[step.nodeId];
+          parts.push(`<span class="graph-chain-node">${esc(lbl(sn, step.nodeId))}</span>`);
+        });
+        // append end node if last step isn't it
+        if (steps.length && steps[steps.length-1]?.nodeId !== trace.endId) {
+          parts.push(`<span class="graph-chain-edge">→</span>`);
+          parts.push(`<span class="graph-chain-node${isSeed(trace.endId)?' seed-node':''}">${esc(lbl(endN, trace.endId))}</span>`);
+        }
+        return `<div class="graph-path-chain">${parts.join('')}</div>`;
+      }).join('');
+
+      pathHtml = `<div class="graph-path-section"><div class="graph-path-label">Inter-seed paths</div>${chains}</div>`;
+    }
+
+    const extras = [];
+    if (seeds.length > maxS)    extras.push(`+${seeds.length - maxS} more seeds`);
+    if (expanded.length > maxE) extras.push(`+${expanded.length - maxE} more expanded`);
+    const extraHtml = extras.length ? `<div class="graph-meta">${extras.join(' · ')}</div>` : '';
+
+    return o.join('') + pathHtml + extraHtml;
+  }
+
   // ── Retrieve ──────────────────────────────────────────────────────────────
   function updateRetrieveWorkspaceSelector() {
     const sel = document.getElementById('ret-workspace');
@@ -1772,10 +2132,10 @@
     const workspace = document.getElementById('ret-workspace').value;
     const top_k     = parseInt(document.getElementById('ret-topk').value, 10) || 8;
     const btn       = document.getElementById('btn-run-query');
-    const results   = document.getElementById('ret-results');
+    const container = document.getElementById('ret-results');
 
     btn.disabled = true;
-    results.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:8px 0"><span class="spinner"></span>Running…</div>`;
+    container.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:8px 0"><span class="spinner"></span>Running…</div>`;
 
     const payload = { query, top_k };
     if (workspace) payload.workspace = workspace;
@@ -1786,54 +2146,90 @@
       const data = await res.json();
       const ms   = Date.now() - t0;
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      _retData = data;
+      _retActiveTab = 'fmt';
       renderRetrieveResults(data, ms);
     } catch (e) {
-      results.innerHTML = `<div class="retrieve-error">✗ ${esc(e.message)}</div>`;
+      container.innerHTML = `<div class="retrieve-error">✗ ${esc(e.message)}</div>`;
     } finally {
       btn.disabled = false;
     }
   }
 
   function renderRetrieveResults(data, ms) {
-    const results   = document.getElementById('ret-results');
+    const container = document.getElementById('ret-results');
     const seeds     = data.seed_notes     || [];
     const expanded  = data.expanded_notes || [];
+    const traces    = data.pathTraces     || [];
+    const fmtCtx    = data.formattedContext || '';
+    const total     = seeds.length + expanded.length;
 
-    if (seeds.length === 0 && expanded.length === 0) {
-      results.innerHTML = `<div class="card"><div class="retrieve-meta"><span class="retrieve-latency">${ms}ms</span></div><div class="retrieve-empty">No results found.</div></div>`;
+    if (total === 0) {
+      container.innerHTML = `<div class="card"><div class="retrieve-meta"><span class="retrieve-latency">${ms}ms</span></div><div class="retrieve-empty">No results found.</div></div>`;
       return;
     }
 
-    const noteCard = (n, cls) => {
-      const title = n.title || n.noteId?.split('/').pop()?.replace('.md','') || '—';
-      const score = typeof n.score === 'number' ? n.score.toFixed(3) : '—';
-      const via   = n.viaEdge ? `<div class="result-via">via ${esc(n.viaEdge)}</div>` : '';
-      return `<div class="result-card ${cls}">
-        <div class="result-title" title="${esc(n.noteId||'')}}">${esc(title)}</div>
-        <div class="result-meta">
-          <span class="result-ws">${esc(n.workspace||'')}</span>
-          <span class="result-score">${score}</span>
+    // path → noteId map for markdown heading anchors
+    const pathToId = {};
+    [...seeds, ...expanded].forEach(n => { if (n.path) pathToId[n.path] = n.noteId; });
+
+    // note card builder
+    const noteCard = (n, kind) => {
+      const title  = n.title || n.path?.split('/').pop() || '—';
+      const score  = typeof n.score === 'number' ? n.score.toFixed(3) : '—';
+      const tier   = n.tier ? `T${n.tier}` : (n.type || '');
+      const safeId = (n.noteId || '').replace(/[^a-zA-Z0-9_-]/g, '-');
+      const via    = kind === 'expanded' && n.viaEdge && n.viaSourceTitle
+        ? `<div class="ret-nc-via">↳ ${esc(n.viaSourceTitle)} —[${esc(edgeLabel(n.viaEdge))}]→</div>`
+        : '';
+      const preview = (n.content || '').slice(0, 480) + ((n.content?.length || 0) > 480 ? '…' : '');
+      return `<div class="ret-nc ${kind}" onclick="toggleNoteCard(this,'${safeId}')">
+        <div class="ret-nc-row1">
+          <span class="ret-nc-title" title="${esc(n.path||'')}">${esc(title)}</span>
+          <span class="ret-nc-score ${kind}">${score}</span>
+        </div>
+        <div class="ret-nc-row2">
+          ${tier ? `<span class="ret-tier">${esc(tier)}</span>` : ''}
+          <span>${esc(n.workspace||'')}</span>
         </div>
         ${via}
+        <div class="ret-nc-body" id="ncb-${safeId}">${esc(preview)}</div>
       </div>`;
     };
 
-    const seedsHtml = seeds.length > 0 ? `
-      <div class="result-section-title">Seed notes (${seeds.length})</div>
-      <div class="result-grid">${seeds.map(n => noteCard(n, 'seed')).join('')}</div>
-    ` : '';
+    const seedCardsHtml = seeds.length
+      ? `<div class="ret-section-sep seed">Seeds &middot; ${seeds.length}</div>${seeds.map(n => noteCard(n,'seed')).join('')}`
+      : '';
+    const expCardsHtml = expanded.length
+      ? `<div class="ret-section-sep expanded">Graph-expanded &middot; ${expanded.length}</div>${expanded.map(n => noteCard(n,'expanded')).join('')}`
+      : '';
 
-    const expandedHtml = expanded.length > 0 ? `
-      <div class="result-section-title">Graph-expanded (${expanded.length})</div>
-      <div class="result-grid">${expanded.map(n => noteCard(n, 'expanded')).join('')}</div>
-    ` : '';
-
-    results.innerHTML = `<div class="card">
-      <div class="retrieve-meta">
-        <span class="retrieve-latency">${ms}ms</span>
-        <span>${seeds.length + expanded.length} notes</span>
+    container.innerHTML = `
+    <div class="ret-layout">
+      <div class="ret-notes-panel">
+        <div class="ret-panel-hdr">
+          Notes <span class="ret-panel-hdr-count">(${total})</span>
+        </div>
+        <div class="ret-notes-scroll">${seedCardsHtml}${expCardsHtml}</div>
       </div>
-      ${seedsHtml}${expandedHtml}
+
+      <div class="ret-out-panel">
+        <div class="ret-out-tabs">
+          <button class="ret-out-tab active" data-retab="fmt"   onclick="switchRetTab('fmt',this)">Formatted</button>
+          <button class="ret-out-tab"         data-retab="graph" onclick="switchRetTab('graph',this)">Graph</button>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+            <span class="retrieve-latency">${ms}ms</span>
+            <span style="color:var(--muted);font-size:11px">${total} notes</span>
+            <button class="ret-copy" id="ret-copy-btn" onclick="copyContext()">Copy</button>
+          </div>
+        </div>
+        <div id="ret-fmt-panel" class="ret-out-body">
+          <div class="md-root">${md2html(fmtCtx, pathToId)}</div>
+        </div>
+        <div id="ret-graph-panel" class="ret-out-body" style="display:none">
+          <div class="ret-graph-inner">${renderPathGraph(seeds, expanded, traces)}</div>
+        </div>
+      </div>
     </div>`;
   }
 
@@ -1918,6 +2314,13 @@
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    const q = document.getElementById('ret-query');
+    if (q) q.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runRetrieve(); }
+    });
+  });
+
   pollStatus();
   pollJobs();
   pollActivity();

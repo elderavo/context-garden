@@ -439,6 +439,7 @@ class KnowledgeGraphEngine:
             "seed_notes": [self._note_to_dict(n) for n in seed_notes],
             "expanded_notes": [self._note_to_dict(n) for n in expanded_notes],
             "formattedContext": formatted_context,
+            "pathTraces": path_traces,
         }
 
     # ------------------------------------------------------------------
