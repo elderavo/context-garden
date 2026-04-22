@@ -1186,6 +1186,14 @@
         <input class="form-input" id="ret-topk" type="number" value="8" min="1" max="50" style="height:38px">
       </div>
       <div>
+        <label class="form-label">Mode</label>
+        <select class="form-input" id="ret-mode" style="height:38px;cursor:pointer">
+          <option value="">Auto</option>
+          <option value="discover">Discover</option>
+          <option value="targeted">Targeted</option>
+        </select>
+      </div>
+      <div>
         <label class="form-label" style="visibility:hidden">Run</label>
         <button class="btn-run" id="btn-run-query" onclick="runRetrieve()">Run Query</button>
       </div>
@@ -2131,6 +2139,7 @@
     if (!query) return;
     const workspace = document.getElementById('ret-workspace').value;
     const top_k     = parseInt(document.getElementById('ret-topk').value, 10) || 8;
+    const mode      = document.getElementById('ret-mode').value;
     const btn       = document.getElementById('btn-run-query');
     const container = document.getElementById('ret-results');
 
@@ -2139,6 +2148,7 @@
 
     const payload = { query, top_k };
     if (workspace) payload.workspace = workspace;
+    if (mode) payload.mode = mode;
 
     const t0 = Date.now();
     try {
@@ -2163,9 +2173,10 @@
     const traces    = data.pathTraces     || [];
     const fmtCtx    = data.formattedContext || '';
     const total     = seeds.length + expanded.length;
+    const modeLabel = data.mode || 'targeted';
 
     if (total === 0) {
-      container.innerHTML = `<div class="card"><div class="retrieve-meta"><span class="retrieve-latency">${ms}ms</span></div><div class="retrieve-empty">No results found.</div></div>`;
+      container.innerHTML = `<div class="card"><div class="retrieve-meta"><span class="retrieve-latency">${ms}ms</span><span style="color:var(--muted);font-size:11px">${esc(modeLabel)}</span></div><div class="retrieve-empty">No results found.</div></div>`;
       return;
     }
 
@@ -2219,6 +2230,7 @@
           <button class="ret-out-tab"         data-retab="graph" onclick="switchRetTab('graph',this)">Graph</button>
           <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
             <span class="retrieve-latency">${ms}ms</span>
+            <span style="color:var(--muted);font-size:11px">${esc(modeLabel)}</span>
             <span style="color:var(--muted);font-size:11px">${total} notes</span>
             <button class="ret-copy" id="ret-copy-btn" onclick="copyContext()">Copy</button>
           </div>

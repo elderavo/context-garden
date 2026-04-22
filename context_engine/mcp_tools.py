@@ -53,7 +53,9 @@ def create_mcp_server(
     @mcp.tool(description=(
         "Search the knowledge base for relevant notes, tools, concepts, and best "
         "practices. Returns markdown-formatted context from the knowledge graph. "
-        "Call this before relying on your own knowledge for any project-specific question."
+        "Use mode='discover' for codebase orientation without specific search terms, "
+        "or mode='targeted' for normal semantic/keyword retrieval. Call this before "
+        "relying on your own knowledge for any project-specific question."
     ))
     async def retrieve_context(
         query: str,
@@ -76,6 +78,8 @@ def create_mcp_server(
         if workspace:
             params["workspace"] = workspace
         if mode:
+            if mode not in {"discover", "targeted"}:
+                return "Invalid mode. Use 'discover', 'targeted', or omit mode for automatic routing."
             params["mode"] = mode
 
         result = await asyncio.to_thread(daemon.handle_query_retrieve, params)
@@ -111,7 +115,7 @@ def create_mcp_server(
         budget = max(500, max_chars or DEFAULT_MAX_CHARS)
         if len(formatted) > budget:
             formatted = formatted[:budget] + "\n\n_(context truncated to fit budget)_\n<!-- End ContextGarden Context -->"
-        formatted += f"\n\n<!-- retrieval_id: {retrieval_id} -->"
+        formatted += f"\n\n<!-- retrieval_id: {retrieval_id}; mode: {result.get('mode', 'targeted')} -->"
         return formatted
 
     # ── find_path ─────────────────────────────────────────────────────────────
