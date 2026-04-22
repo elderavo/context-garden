@@ -947,15 +947,6 @@ function generateMarkdown(
   lines.push(`# ${title}`, "");
   lines.push(`> \`${file.relativePath}\``, "");
 
-  if (file.entrypointFingerprints.length) {
-    lines.push("## Entrypoint Fingerprints", "");
-    lines.push("This file looks like a runtime entrypoint because:", "");
-    for (const fingerprint of file.entrypointFingerprints) {
-      lines.push(`- ${fingerprint}`);
-    }
-    lines.push("");
-  }
-
   // ── Exports ───────────────────────────────────────────────────────────────
   if (file.exports.length) {
     lines.push("## Exports", "");

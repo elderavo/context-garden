@@ -202,6 +202,7 @@ def handle_retrieve(params: dict[str, Any]) -> dict[str, Any]:
         query=params["query"],
         top_k=params.get("top_k"),
         workspace=params.get("workspace"),
+        mode=params.get("mode"),
     )
 
 

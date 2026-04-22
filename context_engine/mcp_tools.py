@@ -59,12 +59,14 @@ def create_mcp_server(
         query: str,
         search_terms: str | None = None,
         workspace: str | None = None,
+        mode: str | None = None,
         max_chars: int | None = None,
     ) -> str:
         """
         query: Your intent in natural language.
         search_terms: Keyword/embedding string for vector DB seed retrieval. Omit to use query.
         workspace: Limit to a specific workspace by name. Omit to search all.
+        mode: Optional retrieval mode, "discover" for orientation or "targeted" for normal search.
         max_chars: Maximum characters to return (default 15000).
         """
         import time
@@ -73,6 +75,8 @@ def create_mcp_server(
         params: dict[str, Any] = {"query": search_terms or query}
         if workspace:
             params["workspace"] = workspace
+        if mode:
+            params["mode"] = mode
 
         result = await asyncio.to_thread(daemon.handle_query_retrieve, params)
 

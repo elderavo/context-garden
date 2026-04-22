@@ -339,6 +339,7 @@ async def _handle_api_retrieve(req: Request) -> JSONResponse:
         "top_k": payload.get("top_k"),
         "workspace": payload.get("workspace"),
         "workspace_id": payload.get("workspace_id"),
+        "mode": payload.get("mode"),
     }
     if not params["query"]:
         return JSONResponse({"error": "query is required"}, status_code=400)

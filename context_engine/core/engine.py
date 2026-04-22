@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -373,12 +374,22 @@ class KnowledgeGraphEngine:
     # Retrieve
     # ------------------------------------------------------------------
 
-    def retrieve(self, query: str, top_k: Optional[int] = None, workspace: Optional[str] = None) -> dict[str, Any]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        workspace: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> dict[str, Any]:
         """Run hybrid retrieval: vector seeds + graph expansion, with keyword fallback.
 
         If workspace is set, only notes from that workspace are returned.
         """
         k = top_k or self.top_k
+        selected_mode = self._select_query_mode(query, mode)
+        if selected_mode == "discover":
+            return self._retrieve_discovery(query=query, top_k=k, workspace=workspace)
+
         seed_notes: list[RetrievedNote] = []
         expanded_notes: list[RetrievedNote] = []
 
@@ -436,11 +447,255 @@ class KnowledgeGraphEngine:
         formatted_context = synthesize(query, seed_notes, raw_context, synth_config) or raw_context
 
         return {
+            "mode": "targeted",
             "seed_notes": [self._note_to_dict(n) for n in seed_notes],
             "expanded_notes": [self._note_to_dict(n) for n in expanded_notes],
             "formattedContext": formatted_context,
             "pathTraces": path_traces,
         }
+
+    @staticmethod
+    def _select_query_mode(query: str, requested_mode: Optional[str] = None) -> str:
+        """Choose discover for orientation prompts, targeted for concrete lookup."""
+        if requested_mode in {"discover", "targeted"}:
+            return requested_mode
+
+        q = query.strip().lower()
+        if not q:
+            return "targeted"
+
+        discover_phrases = (
+            "get oriented",
+            "orient me",
+            "where should i start",
+            "where do i start",
+            "start reading",
+            "entry points",
+            "entrypoints",
+            "codebase map",
+            "map of the codebase",
+            "high level",
+            "big picture",
+            "architecture",
+            "overview",
+            "how is this organized",
+            "how is this structured",
+            "walk me through",
+        )
+        if any(phrase in q for phrase in discover_phrases):
+            return "discover"
+
+        tokens = [normalize_token(w) for w in re.split(r"[^A-Za-z0-9_./-]+", q)]
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            return "targeted"
+
+        # Path-like or symbol-like queries are almost always targeted.
+        if any(("/" in t or "." in t or "_" in t or "-" in t) for t in tokens):
+            return "targeted"
+
+        broad_terms = {
+            "discover",
+            "explore",
+            "orientation",
+            "overview",
+            "map",
+            "structure",
+            "architecture",
+            "entrypoint",
+            "entrypoints",
+            "module",
+            "modules",
+            "start",
+            "starts",
+            "flow",
+            "flows",
+            "main",
+            "important",
+            "key",
+            "core",
+            "system",
+            "codebase",
+        }
+        filler = {"the", "this", "that", "a", "an", "to", "for", "of", "in", "is", "are", "me", "show", "what"}
+        meaningful = [t for t in tokens if t not in filler]
+        if meaningful and all(t in broad_terms for t in meaningful):
+            return "discover"
+
+        return "targeted"
+
+    def _retrieve_discovery(
+        self,
+        query: str,
+        top_k: int,
+        workspace: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Return a queryless codebase map from tags, modules, and graph degree."""
+        notes = [
+            note
+            for note in self._parsed_notes.values()
+            if note.note_type != "index" and (not workspace or note.workspace == workspace)
+        ]
+
+        entrypoint_notes = [
+            self._as_retrieved_note(note, score=1.0, source="discover")
+            for note in notes
+            if note.tier == "2" and "entrypoint" in note.tags
+        ]
+        entrypoint_notes.sort(key=lambda n: (n.path.count("/"), n.path))
+
+        module_notes = [
+            self._as_retrieved_note(note, score=self._module_discovery_score(note), source="discover")
+            for note in notes
+            if note.tier == "3"
+        ]
+        module_notes.sort(key=lambda n: (-n.score, n.path.count("/"), n.path))
+
+        degree = self._graph_degree_by_note(notes)
+        hub_notes = [
+            self._as_retrieved_note(note, score=0.55 + min(degree.get(note.note_id, 0), 20) / 40, source="discover")
+            for note in notes
+            if note.tier in {"2", "3"} and degree.get(note.note_id, 0) > 0
+        ]
+        hub_notes.sort(key=lambda n: (-n.score, n.path))
+
+        seed_notes = self._dedupe_retrieved([
+            *entrypoint_notes[: max(2, top_k // 2)],
+            *module_notes[:top_k],
+            *hub_notes[: max(2, top_k // 2)],
+        ])[: max(top_k, 8)]
+
+        formatted_context = self._format_discovery_context(
+            query=query,
+            entrypoints=entrypoint_notes[:8],
+            modules=module_notes[:12],
+            hubs=hub_notes[:8],
+            degree=degree,
+        )
+
+        return {
+            "mode": "discover",
+            "seed_notes": [self._note_to_dict(n) for n in seed_notes],
+            "expanded_notes": [],
+            "formattedContext": formatted_context,
+            "pathTraces": [],
+        }
+
+    @staticmethod
+    def _as_retrieved_note(note: ParsedNote, score: float, source: str) -> RetrievedNote:
+        return RetrievedNote(
+            note_id=note.note_id,
+            path=note.path,
+            content=note.body,
+            score=score,
+            type=note.note_type,
+            retrieval_source=source,
+            tool_id=note.tool_id,
+            tags=note.tags,
+            linked_from=None,
+            depth=0,
+            tier=note.tier,
+            workspace=note.workspace,
+            title=note.title,
+        )
+
+    @staticmethod
+    def _module_discovery_score(note: ParsedNote) -> float:
+        raw_path = str(note.frontmatter.get("path") or "").strip()
+        if raw_path in {"", "."}:
+            return 1.0
+        depth_penalty = min(raw_path.count("/"), 5) * 0.04
+        return 0.90 - depth_penalty
+
+    def _graph_degree_by_note(self, notes: list[ParsedNote]) -> dict[str, int]:
+        note_ids = {n.note_id for n in notes}
+        degree = {nid: 0 for nid in note_ids}
+        if self.graph_store is None:
+            return degree
+
+        for note_id in note_ids:
+            try:
+                triplets = self.graph_store.get_triplets(entity_names=[note_id])
+            except Exception:
+                continue
+            for source_node, _relation, target_node in triplets:
+                source_name = getattr(source_node, "name", "")
+                target_name = getattr(target_node, "name", "")
+                if source_name in note_ids:
+                    degree[source_name] = degree.get(source_name, 0) + 1
+                if target_name in note_ids and target_name != source_name:
+                    degree[target_name] = degree.get(target_name, 0) + 1
+        return degree
+
+    @staticmethod
+    def _dedupe_retrieved(notes: list[RetrievedNote]) -> list[RetrievedNote]:
+        seen: set[str] = set()
+        result: list[RetrievedNote] = []
+        for note in notes:
+            if note.note_id in seen:
+                continue
+            seen.add(note.note_id)
+            result.append(note)
+        return result
+
+    @staticmethod
+    def _format_discovery_context(
+        *,
+        query: str,
+        entrypoints: list[RetrievedNote],
+        modules: list[RetrievedNote],
+        hubs: list[RetrievedNote],
+        degree: dict[str, int],
+    ) -> str:
+        lines = [
+            "## Discovery Mode",
+            f'Query: "{query}"',
+            "",
+            "This context is a codebase orientation map built from parser metadata, module notes, entrypoint tags, and graph connectivity.",
+            "",
+        ]
+
+        if entrypoints:
+            lines.extend(["## Likely Entrypoints", ""])
+            for note in entrypoints:
+                lines.append(f"- [[{note.note_id}]] `{note.path}`")
+            lines.append("")
+
+        if modules:
+            lines.extend(["## Module Map", ""])
+            for note in modules:
+                source_path = "." if note.path == "root_module.md" else note.path.replace("_module.md", "")
+                lines.append(f"- [[{note.note_id}]] `{source_path}`")
+            lines.append("")
+
+        if hubs:
+            lines.extend(["## High-Connectivity Notes", ""])
+            for note in hubs:
+                lines.append(f"- [[{note.note_id}]] degree={degree.get(note.note_id, 0)} `{note.path}`")
+            lines.append("")
+
+        if entrypoints:
+            lines.extend(["## Entrypoint Details", ""])
+            for note in entrypoints[:4]:
+                lines.append(f"### {note.note_id}")
+                lines.append(KnowledgeGraphEngine._context_excerpt(note.content))
+                lines.append("")
+
+        if modules:
+            lines.extend(["## Module Details", ""])
+            for note in modules[:6]:
+                lines.append(f"### {note.note_id}")
+                lines.append(KnowledgeGraphEngine._context_excerpt(note.content))
+                lines.append("")
+
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _context_excerpt(content: str, max_chars: int = 1200) -> str:
+        content = content.strip()
+        if len(content) <= max_chars:
+            return content
+        return content[:max_chars].rstrip() + "\n..."
 
     # ------------------------------------------------------------------
     # Inter-seed path finding

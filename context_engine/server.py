@@ -705,7 +705,12 @@ class _DaemonServer:
             raise RuntimeError("Workspace is still initializing; try again shortly.")
 
         with rt._engine_lock:
-            result = rt.engine.retrieve(query=query, top_k=top_k, workspace=workspace_filter)
+            result = rt.engine.retrieve(
+                query=query,
+                top_k=top_k,
+                workspace=workspace_filter,
+                mode=params.get("mode"),
+            )
         try:
             from . import http_server as _hs
             _hs.record_retrieval(query, result)
