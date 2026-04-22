@@ -434,10 +434,60 @@ function symbolNotePath(mirrorDir: string, relPath: string, symbolName: string):
   return path.join(mirrorDir, subdir, sanitizeSymbolName(symbolName) + ".md");
 }
 
-function moduleNotePath(mirrorDir: string, dirRel: string): string {
+function baseModuleNotePath(mirrorDir: string, dirRel: string): string {
   return dirRel === "."
     ? path.join(mirrorDir, "root_module.md")
     : path.join(mirrorDir, dirRel + "_module.md");
+}
+
+function readFrontmatterLanguage(notePath: string): string | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(notePath, "utf8");
+  } catch {
+    return null;
+  }
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return null;
+  const lang = match[1].match(/^language:\s*(\S+)\s*$/m);
+  return lang ? lang[1] : null;
+}
+
+function moduleNotePath(mirrorDir: string, dirRel: string, language = "c"): string {
+  const basePath = baseModuleNotePath(mirrorDir, dirRel);
+  const existingLanguage = readFrontmatterLanguage(basePath);
+  if (!fs.existsSync(basePath) || existingLanguage === language || existingLanguage === null) {
+    return basePath;
+  }
+  return basePath.replace(/\.md$/, `_${language}.md`);
+}
+
+function moduleWikiLink(mirrorDir: string, dirRel: string, prefix: string, language = "c"): string {
+  const rel = path.relative(mirrorDir, moduleNotePath(mirrorDir, dirRel, language)).replace(/\\/g, "/").replace(/\.md$/, "");
+  return `${prefix}/${rel}`;
+}
+
+function buildDirectoryEntries(files: FileData[]): Map<string, { relPath: string; stem: string }[]> {
+  const byDir = new Map<string, { relPath: string; stem: string }[]>();
+  if (files.length === 0) return byDir;
+  const ensureDir = (dirRel: string) => {
+    if (!byDir.has(dirRel)) byDir.set(dirRel, []);
+  };
+
+  ensureDir(".");
+  for (const file of files) {
+    const dirRel = path.posix.dirname(file.relativePath);
+    ensureDir(dirRel);
+    byDir.get(dirRel)!.push({ relPath: file.relativePath, stem: mirrorStem(file.relativePath) });
+
+    let current = dirRel;
+    while (current !== ".") {
+      current = path.posix.dirname(current);
+      ensureDir(current);
+    }
+  }
+
+  return byDir;
 }
 
 function extractSummarySection(mirrorPath: string): string | null {
@@ -458,12 +508,14 @@ function generateSymbolNote(
   _today: string,
   prefix = MIRROR_PREFIX,
   workspace?: string,
+  moduleLinkByDir?: Map<string, string>,
 ): string {
   const lines: string[] = [];
   const dirRel = path.posix.dirname(file.relativePath);
   const stem = mirrorStem(file.relativePath);
   const parentFileLink = dirRel === "." ? `${prefix}/${stem}` : `${prefix}/${dirRel}/${stem}`;
-  const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
+  const parentModuleLink = moduleLinkByDir?.get(dirRel)
+    ?? (dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`);
 
   lines.push(
     "---",
@@ -533,6 +585,7 @@ function generateModuleNote(
   prefix = MIRROR_PREFIX,
   workspace?: string,
   childModuleLinks: string[] = [],
+  parentModuleLink?: string,
 ): string {
   const lines: string[] = [];
   const dirName = dirRel === "." ? "root" : path.posix.basename(dirRel);
@@ -553,6 +606,11 @@ function generateModuleNote(
 
   lines.push(`# ${dirName}`, "");
   lines.push("*Module summary not yet generated.*", "");
+
+  if (parentModuleLink) {
+    lines.push("## Parent", "");
+    lines.push(`- [[${parentModuleLink}]]`, "");
+  }
 
   if (childModuleLinks.length > 0) {
     lines.push("## Submodules", "");
@@ -577,11 +635,13 @@ function generateFileMarkdown(
   _today: string,
   prefix = MIRROR_PREFIX,
   workspace?: string,
+  moduleLinkByDir?: Map<string, string>,
 ): string {
   const lines: string[] = [];
   const filename = path.basename(file.relativePath);
   const dirRel = path.posix.dirname(file.relativePath);
-  const parentModuleLink = dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`;
+  const parentModuleLink = moduleLinkByDir?.get(dirRel)
+    ?? (dirRel === "." ? `${prefix}/root_module` : `${prefix}/${dirRel}_module`);
 
   lines.push(
     "---",
@@ -725,6 +785,10 @@ export async function runMirrorC(
   const validPaths = new Set<string>();
   let written = 0;
   let skipped = 0;
+  const byDir = buildDirectoryEntries(files);
+  const moduleLinkByDir = new Map(
+    [...byDir.keys()].map((dirRel) => [dirRel, moduleWikiLink(opts.mirrorDir, dirRel, prefix, "c")]),
+  );
 
   for (const file of files) {
     validPaths.add(path.resolve(file.mirrorPath));
@@ -751,7 +815,7 @@ export async function runMirrorC(
       for (const symbol of definedSymbols) {
         const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, symbol);
         if (!fs.existsSync(symPath)) {
-          const symMarkdown = generateSymbolNote(file, file.exports.find((e) => e.name === symbol)!, today, prefix, opts.workspace);
+          const symMarkdown = generateSymbolNote(file, file.exports.find((e) => e.name === symbol)!, today, prefix, opts.workspace, moduleLinkByDir);
           const preserved = extractSummarySection(symPath);
           const final = preserved ? symMarkdown.trimEnd() + "\n\n" + preserved + "\n" : symMarkdown;
           fs.mkdirSync(path.dirname(symPath), { recursive: true });
@@ -762,7 +826,7 @@ export async function runMirrorC(
       continue;
     }
 
-    const markdown = generateFileMarkdown(file, files, today, prefix, opts.workspace);
+    const markdown = generateFileMarkdown(file, files, today, prefix, opts.workspace, moduleLinkByDir);
     const preserved = extractSummarySection(file.mirrorPath);
     const final = preserved ? markdown.trimEnd() + "\n\n" + preserved + "\n" : markdown;
     fs.mkdirSync(path.dirname(file.mirrorPath), { recursive: true });
@@ -771,7 +835,7 @@ export async function runMirrorC(
 
     for (const exp of file.exports) {
       const symPath = symbolNotePath(opts.mirrorDir, file.relativePath, exp.name);
-      const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace);
+      const symMarkdown = generateSymbolNote(file, exp, today, prefix, opts.workspace, moduleLinkByDir);
       const preserved = extractSummarySection(symPath);
       const final = preserved ? symMarkdown.trimEnd() + "\n\n" + preserved + "\n" : symMarkdown;
       fs.mkdirSync(path.dirname(symPath), { recursive: true });
@@ -779,23 +843,14 @@ export async function runMirrorC(
     }
   }
 
-  const byDir = new Map<string, { relPath: string; stem: string }[]>();
-  for (const file of files) {
-    const dirRel = path.posix.dirname(file.relativePath);
-    if (!byDir.has(dirRel)) byDir.set(dirRel, []);
-    byDir.get(dirRel)!.push({ relPath: file.relativePath, stem: mirrorStem(file.relativePath) });
-  }
-
   for (const [dirRel, fileEntries] of byDir) {
-    const modPath = moduleNotePath(opts.mirrorDir, dirRel);
+    const modPath = moduleNotePath(opts.mirrorDir, dirRel, "c");
     validPaths.add(path.resolve(modPath));
 
     const childModuleLinksSet = new Set<string>();
     for (const key of byDir.keys()) {
       if (path.posix.dirname(key) === dirRel && key !== dirRel) {
-        const childName = path.posix.basename(key);
-        const link = dirRel === "." ? `${prefix}/${childName}_module` : `${prefix}/${dirRel}/${childName}_module`;
-        childModuleLinksSet.add(`[[${link}]]`);
+        childModuleLinksSet.add(`[[${moduleLinkByDir.get(key)}]]`);
       }
     }
 
@@ -812,6 +867,7 @@ export async function runMirrorC(
       // directory may not exist yet
     }
     const childModuleLinks = [...childModuleLinksSet].sort();
+    const parentModuleLink = dirRel === "." ? undefined : moduleLinkByDir.get(path.posix.dirname(dirRel));
 
     const existingFileLinks = extractModuleFileLinks(modPath);
     const existingSubmoduleLinks = extractModuleSubmoduleLinks(modPath);
@@ -827,7 +883,7 @@ export async function runMirrorC(
       || JSON.stringify(existingSubmoduleLinks.sort()) !== JSON.stringify(childModuleLinks);
 
     if (needsWrite) {
-      const modMarkdown = generateModuleNote(dirRel, fileEntries, today, prefix, opts.workspace, childModuleLinks);
+      const modMarkdown = generateModuleNote(dirRel, fileEntries, today, prefix, opts.workspace, childModuleLinks, parentModuleLink);
       const preserved = extractSummarySection(modPath);
       const final = preserved ? modMarkdown.trimEnd() + "\n\n" + preserved + "\n" : modMarkdown;
       fs.mkdirSync(path.dirname(modPath), { recursive: true });

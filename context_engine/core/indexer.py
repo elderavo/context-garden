@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 from pathlib import Path
 from typing import Any, Optional
 
@@ -241,6 +242,23 @@ def _resolve_link(target: str, notes_by_id: dict[str, ParsedNote]) -> Optional[s
     return candidates[0].note_id
 
 
+def _module_source_dir(note: ParsedNote) -> str:
+    """Return the source directory represented by a tier-3 module note."""
+    if note.tier != "3":
+        return ""
+    raw = str(note.frontmatter.get("path") or "").strip().replace("\\", "/").strip("/")
+    return raw or "."
+
+
+def _is_direct_child_module(parent_dir: str, child_dir: str) -> bool:
+    """True when child_dir is exactly one directory below parent_dir."""
+    if not parent_dir or not child_dir or parent_dir == child_dir:
+        return False
+    if parent_dir == ".":
+        return "/" not in child_dir and child_dir != "."
+    return posixpath.dirname(child_dir) == parent_dir
+
+
 # ---------------------------------------------------------------------------
 # Graph store construction (separated from vector index)
 # ---------------------------------------------------------------------------
@@ -350,18 +368,35 @@ def _build_graph_store(
                 elif note.tier == "2" and target_note.tier == "2":
                     edge_label = "IMPORTS"
                 elif note.tier == "3" and target_note.tier == "3":
-                    # Parent module lists child modules in ## Submodules → CONTAINS + inverse
-                    relations.append(Relation(
-                        label="CONTAINS",
-                        source_id=note.note_id,
-                        target_id=resolved,
-                    ))
-                    relations.append(Relation(
-                        label="BELONGS_TO",
-                        source_id=resolved,
-                        target_id=note.note_id,
-                    ))
-                    continue
+                    # Module notes can link downward from ## Submodules or upward
+                    # from ## Parent. Use source directory paths to orient edges.
+                    source_dir = _module_source_dir(note)
+                    target_dir = _module_source_dir(target_note)
+                    if _is_direct_child_module(source_dir, target_dir):
+                        relations.append(Relation(
+                            label="CONTAINS",
+                            source_id=note.note_id,
+                            target_id=resolved,
+                        ))
+                        relations.append(Relation(
+                            label="BELONGS_TO",
+                            source_id=resolved,
+                            target_id=note.note_id,
+                        ))
+                        continue
+                    if _is_direct_child_module(target_dir, source_dir):
+                        relations.append(Relation(
+                            label="BELONGS_TO",
+                            source_id=note.note_id,
+                            target_id=resolved,
+                        ))
+                        relations.append(Relation(
+                            label="CONTAINS",
+                            source_id=resolved,
+                            target_id=note.note_id,
+                        ))
+                        continue
+                    edge_label = "LINKS_TO"
                 else:
                     # Cross-tier wikilinks in code notes → generic
                     edge_label = "LINKS_TO"
