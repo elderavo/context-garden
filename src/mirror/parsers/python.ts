@@ -115,6 +115,7 @@ interface FileData {
   callSites: CallSite[];
   inRepoCalls: InRepoCall[];
   callIns: CallIn[];
+  entrypointFingerprints: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +193,49 @@ function collectFiles(
 
   walk(scanDir);
   return results;
+}
+
+function detectEntrypointFingerprints(
+  relativePath: string,
+  source: string,
+  functions: FunctionInfo[],
+): string[] {
+  const fingerprints = new Set<string>();
+  const base = path.posix.basename(relativePath).toLowerCase();
+  const dirParts = path.posix.dirname(relativePath).split("/");
+
+  if (["__main__.py", "main.py", "cli.py", "server.py", "app.py", "manage.py", "wsgi.py", "asgi.py"].includes(base)) {
+    fingerprints.add(`entrypoint-like file name: ${base}`);
+  }
+  if (dirParts.some((part) => ["bin", "cli", "scripts"].includes(part.toLowerCase()))) {
+    fingerprints.add("located under an entrypoint-like directory");
+  }
+  if (source.startsWith("#!")) {
+    fingerprints.add("shebang executable script");
+  }
+  if (/\bif\s+__name__\s*==\s*["']__main__["']\s*:/.test(source)) {
+    fingerprints.add("uses Python __main__ guard");
+  }
+  if (functions.some((fn) => !fn.isMethod && fn.name === "main")) {
+    fingerprints.add("declares a function named main");
+  }
+  if (/\bmain\s*\([^)]*\)/.test(source) && /\b__main__\b/.test(source)) {
+    fingerprints.add("invokes main() from the __main__ guard");
+  }
+  if (/\bargparse\b|\bArgumentParser\s*\(/.test(source)) {
+    fingerprints.add("configures argparse CLI handling");
+  }
+  if (/\b(click|typer)\b/.test(source) || /@\w+\.command\b|@\w+\.group\b/.test(source)) {
+    fingerprints.add("uses click or typer CLI structure");
+  }
+  if (/\buvicorn\.run\s*\(|\bapp\.run\s*\(/.test(source)) {
+    fingerprints.add("starts an application server");
+  }
+  if (/\bexecute_from_command_line\s*\(/.test(source)) {
+    fingerprints.add("Django management command entrypoint");
+  }
+
+  return [...fingerprints];
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +579,7 @@ function extractFileData(
     callSites: extractCallSites(source),
     inRepoCalls: [],
     callIns: [],
+    entrypointFingerprints: detectEntrypointFingerprints(relativePath, source, functions),
   };
 }
 
@@ -889,6 +934,7 @@ function generateMarkdown(
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
+    ...(file.entrypointFingerprints.length ? ["  - entrypoint"] : []),
     "---",
     ""
   );
@@ -900,6 +946,15 @@ function generateMarkdown(
     : filename;
   lines.push(`# ${title}`, "");
   lines.push(`> \`${file.relativePath}\``, "");
+
+  if (file.entrypointFingerprints.length) {
+    lines.push("## Entrypoint Fingerprints", "");
+    lines.push("This file looks like a runtime entrypoint because:", "");
+    for (const fingerprint of file.entrypointFingerprints) {
+      lines.push(`- ${fingerprint}`);
+    }
+    lines.push("");
+  }
 
   // ── Exports ───────────────────────────────────────────────────────────────
   if (file.exports.length) {

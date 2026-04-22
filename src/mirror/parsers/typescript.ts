@@ -108,6 +108,7 @@ interface FileData {
   callSites: CallSite[];  // all call expression names + positions (pass 1)
   inRepoCalls: InRepoCall[];  // filled in pass 2
   callIns: CallIn[];          // filled in pass 2
+  entrypointFingerprints: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +187,52 @@ function collectFiles(
 
   walk(scanDir);
   return results;
+}
+
+function detectEntrypointFingerprints(relativePath: string, source: string): string[] {
+  const fingerprints = new Set<string>();
+  const base = path.posix.basename(relativePath).toLowerCase();
+  const dirParts = path.posix.dirname(relativePath).split("/");
+
+  if (["main.ts", "cli.ts", "server.ts", "app.ts", "bootstrap.ts"].includes(base)) {
+    fingerprints.add(`entrypoint-like file name: ${base}`);
+  }
+  if (base === "index.ts" && path.posix.dirname(relativePath) === ".") {
+    fingerprints.add("root index.ts file");
+  }
+  if (dirParts.some((part) => ["bin", "cli", "scripts"].includes(part.toLowerCase()))) {
+    fingerprints.add("located under an entrypoint-like directory");
+  }
+  if (source.startsWith("#!")) {
+    fingerprints.add("shebang executable script");
+  }
+  if (/\b(?:export\s+)?(?:async\s+)?function\s+main\s*\(/.test(source)
+    || /\b(?:const|let|var)\s+main\s*=\s*(?:async\s*)?\(?/.test(source)) {
+    fingerprints.add("declares a function named main");
+  }
+  if (/\b(?:export\s+)?(?:async\s+)?function\s+bootstrap\s*\(/.test(source)
+    || /\b(?:const|let|var)\s+bootstrap\s*=/.test(source)) {
+    fingerprints.add("declares a bootstrap function");
+  }
+  if (/\bmain\s*\([^)]*\)\s*(?:\.catch\s*\(|;|\n)/.test(source)) {
+    fingerprints.add("invokes main() at module scope");
+  }
+  if (/require\.main\s*===\s*module/.test(source)
+    || (/import\.meta\.url/.test(source) && /process\.argv\[[01]\]/.test(source))) {
+    fingerprints.add("uses Node entrypoint guard");
+  }
+  if (/\bprocess\.argv\b/.test(source)) {
+    fingerprints.add("reads process.argv");
+  }
+  if (/\b(?:program|commander|yargs)\.(?:parse|command|option)\b/.test(source)) {
+    fingerprints.add("configures a CLI parser");
+  }
+  if (/\b(?:app|server)\.listen\s*\(/.test(source)
+    || /\bcreateServer\s*\(/.test(source)) {
+    fingerprints.add("starts a listening server");
+  }
+
+  return [...fingerprints];
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +475,7 @@ function extractFileData(
     callSites: extractCallSites(sf),
     inRepoCalls: [],
     callIns: [],
+    entrypointFingerprints: detectEntrypointFingerprints(relativePath, source),
   };
 }
 
@@ -563,6 +611,7 @@ function generateMarkdown(
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
+    ...(file.entrypointFingerprints.length ? ["  - entrypoint"] : []),
     "---",
     ""
   );
@@ -572,6 +621,15 @@ function generateMarkdown(
   const title = filename === "index.ts" ? file.relativePath : filename;
   lines.push(`# ${title}`, "");
   lines.push(`> \`${file.relativePath}\``, "");
+
+  if (file.entrypointFingerprints.length) {
+    lines.push("## Entrypoint Fingerprints", "");
+    lines.push("This file looks like a runtime entrypoint because:", "");
+    for (const fingerprint of file.entrypointFingerprints) {
+      lines.push(`- ${fingerprint}`);
+    }
+    lines.push("");
+  }
 
   // ── Exports ──────────────────────────────────────────────────────────────
   if (file.exports.length) {

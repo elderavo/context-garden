@@ -97,6 +97,7 @@ interface FileData {
   callSites: CallSite[];
   inRepoCalls: InRepoCall[];
   callIns: CallIn[];
+  entrypointFingerprints: string[];
 }
 
 export interface MirrorCOptions {
@@ -199,6 +200,41 @@ function collectFiles(
 
   walk(scanDir);
   return results;
+}
+
+function detectEntrypointFingerprints(
+  relativePath: string,
+  source: string,
+  functions: FunctionInfo[],
+): string[] {
+  const fingerprints = new Set<string>();
+  const base = path.posix.basename(relativePath).toLowerCase();
+  const dirParts = path.posix.dirname(relativePath).split("/");
+
+  if (base === "main.c") {
+    fingerprints.add("entrypoint-like file name: main.c");
+  }
+  if (dirParts.some((part) => ["bin", "cli", "tools", "examples", "samples"].includes(part.toLowerCase()))) {
+    fingerprints.add("located under an entrypoint-like directory");
+  }
+  const mainFn = functions.find((fn) => fn.name === "main");
+  if (mainFn) {
+    fingerprints.add("declares C main function");
+    if (/\bargc\b/.test(mainFn.signature) || /\bargv\b/.test(mainFn.signature)) {
+      fingerprints.add("main signature accepts argc or argv");
+    }
+  }
+  if (functions.some((fn) => fn.name === "WinMain" || fn.name === "wWinMain")) {
+    fingerprints.add("declares Windows GUI entrypoint");
+  }
+  if (/\bgetopt(?:_long)?\s*\(/.test(source)) {
+    fingerprints.add("parses command line options");
+  }
+  if (/\b(?:listen|accept|bind)\s*\(/.test(source)) {
+    fingerprints.add("starts or accepts server sockets");
+  }
+
+  return [...fingerprints];
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +401,7 @@ function extractFileData(
     callSites: extractCallSites(source),
     inRepoCalls: [],
     callIns: [],
+    entrypointFingerprints: detectEntrypointFingerprints(relativePath, source, functions),
   };
 }
 
@@ -653,6 +690,7 @@ function generateFileMarkdown(
     ...(workspace ? [`workspace: ${workspace}`] : []),
     "tags:",
     "  - codeUnit",
+    ...(file.entrypointFingerprints.length ? ["  - entrypoint"] : []),
     "---",
     "",
   );
@@ -660,6 +698,15 @@ function generateFileMarkdown(
   const title = filename;
   lines.push(`# ${title}`, "");
   lines.push(`> \`${file.relativePath}\``, "");
+
+  if (file.entrypointFingerprints.length) {
+    lines.push("## Entrypoint Fingerprints", "");
+    lines.push("This file looks like a runtime entrypoint because:", "");
+    for (const fingerprint of file.entrypointFingerprints) {
+      lines.push(`- ${fingerprint}`);
+    }
+    lines.push("");
+  }
 
   if (file.exports.length) {
     lines.push("## Exports", "");
