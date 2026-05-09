@@ -175,6 +175,12 @@ def list_workspace_summaries(
     return result
 
 
+# TODO: multi-branch support — currently one workspace = one branch. To query
+# across branches of the same repo (e.g. feature branch vs master), a user must
+# register separate workspaces. A proper solution would let a single workspace
+# track multiple branches, with notes namespaced by branch and retrieve_context
+# accepting an optional branch filter. Webhook routing and sync jobs would need
+# to fan out per-branch on push events.
 async def register_workspace(
     *,
     payload: dict[str, Any],
