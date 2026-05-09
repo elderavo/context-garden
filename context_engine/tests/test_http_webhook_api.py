@@ -19,9 +19,11 @@ class _FakeRequest:
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         app_state: Any = None,
+        path_params: dict[str, str] | None = None,
     ) -> None:
         self._json_body = json_body if json_body is not None else {}
         self.headers = headers if headers is not None else {}
+        self.path_params = path_params if path_params is not None else {}
         self.app = type("_App", (), {"state": app_state})()
 
     async def json(self) -> dict[str, Any]:
@@ -119,6 +121,12 @@ class HttpWebhookApiTests(unittest.IsolatedAsyncioTestCase):
         assert job is not None
         self.assertEqual(job.workspace_id, "ws-1")
         self.assertEqual(job.type, "sync_workspace")
+        entry = self.app.state.workspace_repo.get_by_id("ws-1")
+        assert entry is not None
+        status = entry.get("status", {})
+        self.assertEqual(status.get("lastWebhookStatus"), "accepted")
+        self.assertEqual(status.get("lastWebhookCommit"), "abc123")
+        self.assertEqual(status.get("lastWebhookRef"), "refs/heads/main")
 
     async def test_duplicate_delivery_is_ignored_without_second_job(self) -> None:
         first = await http_server._handle_gitlab_webhook(
@@ -152,6 +160,60 @@ class HttpWebhookApiTests(unittest.IsolatedAsyncioTestCase):
             j for j in jobs.list_jobs() if j.workspace_id == "ws-1" and j.type == "sync_workspace"
         ]
         self.assertEqual(len(workspace_jobs), 1)
+        entry = self.app.state.workspace_repo.get_by_id("ws-1")
+        assert entry is not None
+        self.assertEqual(entry.get("status", {}).get("lastWebhookStatus"), "ignored_duplicate")
+
+    async def test_workspace_scoped_webhook_route_rejects_invalid_token_for_target_workspace(self) -> None:
+        req = self._req(
+            headers={
+                "X-Gitlab-Token": "wrong-token",
+                "X-Gitlab-Event-UUID": "delivery-3",
+                "X-Gitlab-Event": "Push Hook",
+            },
+            json_body={"ref": "refs/heads/main", "after": "fff999"},
+        )
+        req.path_params = {"workspace_id": "ws-1"}  # type: ignore[attr-defined]
+
+        response = await http_server._handle_gitlab_webhook(req)
+
+        self.assertEqual(response.status_code, 401)
+        body = _json_response_body(response)
+        self.assertEqual(body["error"], "Unknown webhook token")
+        entry = self.app.state.workspace_repo.get_by_id("ws-1")
+        assert entry is not None
+        status = entry.get("status", {})
+        self.assertEqual(status.get("lastWebhookStatus"), "rejected_invalid_token")
+        self.assertEqual(status.get("lastWebhookCommit"), "fff999")
+
+
+    async def test_repair_webhook_returns_result(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "context_engine.app.services.workspace_service.repair_workspace_webhook",
+            new=AsyncMock(return_value={
+                "status": "installed",
+                "webhookUrl": "http://localhost:7433/webhooks/gitlab/ws-1",
+                "hookId": 42,
+                "error": None,
+                "manualFallback": {"url": "http://localhost:7433/webhooks/gitlab/ws-1", "secret": "secret-token", "events": ["push"]},
+            }),
+        ):
+            req = self._req()
+            req.path_params = {"id": "ws-1"}  # type: ignore[attr-defined]
+            response = await http_server._handle_workspace_repair_webhook(req)
+
+        self.assertEqual(response.status_code, 200)
+        body = _json_response_body(response)
+        self.assertEqual(body["status"], "installed")
+        self.assertEqual(body["hookId"], 42)
+
+    async def test_repair_webhook_not_found(self) -> None:
+        req = self._req()
+        req.path_params = {"id": "nonexistent"}  # type: ignore[attr-defined]
+        response = await http_server._handle_workspace_repair_webhook(req)
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

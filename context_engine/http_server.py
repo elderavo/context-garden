@@ -94,6 +94,7 @@ async def _handle_gitlab_webhook(req: Request) -> JSONResponse:
     from .app.services import webhook_service
 
     token = req.headers.get("X-Gitlab-Token")
+    workspace_id = req.path_params.get("workspace_id")
     workspaces = req.app.state.workspace_repo.list_all()
     headers = dict(req.headers)
 
@@ -110,6 +111,8 @@ async def _handle_gitlab_webhook(req: Request) -> JSONResponse:
         headers=headers,
         event_bus=req.app.state.event_bus,
         inbox_repository=req.app.state.webhook_inbox_repo,
+        workspace_id=workspace_id,
+        workspace_repository=req.app.state.workspace_repo,
     )
     return JSONResponse(result.body, status_code=result.status)
 
@@ -119,6 +122,39 @@ async def _handle_list_workspaces(req: Request) -> JSONResponse:
     all_jobs = req.app.state.job_queue.list_jobs()
     result = workspace_service.list_workspace_summaries(entries=entries, jobs=all_jobs)
     return JSONResponse(result)
+
+
+def _merge_workspace_runtime_status(
+    *,
+    daemon_health: dict[str, Any],
+    workspace_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    merged = dict(daemon_health)
+    entries_by_id = {entry.get("id"): entry for entry in workspace_entries}
+    workspaces = []
+    for runtime_ws in daemon_health.get("workspaces", []):
+        wid = runtime_ws.get("workspace_id")
+        entry = entries_by_id.get(wid)
+        merged_ws = dict(runtime_ws)
+        if entry:
+            summary = workspace_service.enrich_workspace_summary(entry)
+            merged_ws.update(
+                {
+                    "sourceType": summary["sourceType"],
+                    "branch": summary["branch"],
+                    "source": summary["source"],
+                    "sourceDir": summary["sourceDir"],
+                    "webhookPath": summary["webhookPath"],
+                    "gitlabConfig": summary["gitlabConfig"],
+                    "status": summary["status"],
+                    "lastSync": summary["lastSync"],
+                    "isCurrent": summary["isCurrent"],
+                    "drifted": summary["drifted"],
+                }
+            )
+        workspaces.append(merged_ws)
+    merged["workspaces"] = workspaces
+    return merged
 
 
 async def _run_workspace_sync_and_reindex(daemon: Any, workspace_name: str) -> None:
@@ -154,6 +190,7 @@ async def _handle_register_workspace(req: Request) -> JSONResponse:
         {
             "status": "registered",
             "entry": result.entry,
+            "workspace": workspace_service.enrich_workspace_summary(result.entry),
             "notesGenerated": result.notes_generated,
             "notePaths": result.note_paths,
             "indexing": "running",
@@ -195,6 +232,20 @@ async def _handle_workspace_rebuild(req: Request) -> JSONResponse:
 
     job = req.app.state.job_queue.enqueue_rebuild(entry["id"], entry["name"], "manual")
     return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
+
+
+async def _handle_workspace_repair_webhook(req: Request) -> JSONResponse:
+    workspace_id = req.path_params["id"]
+    try:
+        result = await workspace_service.repair_workspace_webhook(
+            workspace_id=workspace_id,
+            workspace_repository=req.app.state.workspace_repo,
+        )
+    except KeyError:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result)
 
 
 async def _handle_workspace_unregister(req: Request) -> JSONResponse:
@@ -268,7 +319,8 @@ async def _handle_get_job(req: Request) -> JSONResponse:
 async def _handle_status(req: Request) -> JSONResponse:
     try:
         health = await asyncio.to_thread(req.app.state.daemon.handle_daemon_health, {})
-        return JSONResponse(health)
+        entries = req.app.state.workspace_repo.list_all()
+        return JSONResponse(_merge_workspace_runtime_status(daemon_health=health, workspace_entries=entries))
     except Exception:
         return JSONResponse({"status": "stopped"})
 
@@ -484,6 +536,7 @@ def make_http_app(
         Route("/.well-known/oauth-protected-resource", _handle_oauth_protected_resource, methods=["GET"]),
         Route("/", _handle_index, methods=["GET"]),
         Route("/webhooks/gitlab", _handle_gitlab_webhook, methods=["POST"]),
+        Route("/webhooks/gitlab/{workspace_id}", _handle_gitlab_webhook, methods=["POST"]),
 
         Route("/api/workspaces", _handle_register_workspace, methods=["POST"]),
         Route("/api/workspaces", _handle_list_workspaces, methods=["GET"]),
@@ -495,6 +548,7 @@ def make_http_app(
         Route("/api/workspaces/{id}/rebuild", _handle_workspace_rebuild, methods=["POST"]),
         Route("/workspaces/{id}/unregister", _handle_workspace_unregister, methods=["POST"]),
         Route("/api/workspaces/{id}/unregister", _handle_workspace_unregister, methods=["POST"]),
+        Route("/api/workspaces/{id}/repair-webhook", _handle_workspace_repair_webhook, methods=["POST"]),
 
         Route("/jobs", _handle_list_jobs, methods=["GET"]),
         Route("/jobs/{id}", _handle_get_job, methods=["GET"]),

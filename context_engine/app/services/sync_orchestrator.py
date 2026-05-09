@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,7 @@ from ..ports.git_client import GitClient
 from ..ports.indexer_service import IndexerService
 from ..ports.mirror_service import MirrorService
 from ..ports.workspace_repository import WorkspaceRepository
+from . import workspace_service
 
 
 @dataclass
@@ -39,6 +41,17 @@ class SyncOrchestrator:
         gitlab_config = entry["gitlabConfig"]
         token = self._resolve_token(gitlab_config)
         indexing_paused = False
+        synced_commit = ""
+        workspace_service.update_workspace_status(
+            workspace_repository=self.workspace_repository,
+            workspace_id=entry["id"],
+            patch={
+                "lastSyncStartedAt": datetime.now(timezone.utc).isoformat(),
+                "lastSyncCompletedAt": None,
+                "lastSyncStatus": "running",
+                "lastSyncError": "",
+            },
+        )
 
         try:
             log("Pausing watcher-driven indexing...")
@@ -54,6 +67,12 @@ class SyncOrchestrator:
                 ssh_key_file=entry.get("sshKeyFile"),
             )
             log("Fetch complete.")
+            synced_commit = workspace_service.resolve_workspace_clone_commit(entry)
+            workspace_service.update_workspace_status(
+                workspace_repository=self.workspace_repository,
+                workspace_id=entry["id"],
+                patch={"currentCloneCommit": synced_commit},
+            )
 
             log("Mirroring...")
             result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=gitlab_config)
@@ -69,6 +88,18 @@ class SyncOrchestrator:
                 summarized = sum(summary_result.get("summarized", {}).values())
                 skipped = sum(summary_result.get("skipped", {}).values())
                 log(f"Summary stage complete. Summaries written: {summarized}. Skipped: {skipped}.")
+        except Exception as exc:
+            workspace_service.update_workspace_status(
+                workspace_repository=self.workspace_repository,
+                workspace_id=entry["id"],
+                patch={
+                    "lastSyncCompletedAt": datetime.now(timezone.utc).isoformat(),
+                    "lastSyncStatus": "failed",
+                    "lastSyncError": str(exc),
+                    "currentCloneCommit": synced_commit or workspace_service.resolve_workspace_clone_commit(entry),
+                },
+            )
+            raise
         finally:
             if indexing_paused:
                 log("Resuming watcher-driven indexing...")
@@ -77,6 +108,17 @@ class SyncOrchestrator:
         log("Triggering post-sync reindex...")
         await self.indexer_service.trigger_reindex(workspace_name=entry["name"])
         log("Post-sync reindex complete.")
+        workspace_service.update_workspace_status(
+            workspace_repository=self.workspace_repository,
+            workspace_id=entry["id"],
+            patch={
+                "lastSyncCompletedAt": datetime.now(timezone.utc).isoformat(),
+                "lastSyncStatus": "done",
+                "lastSyncError": "",
+                "lastSyncedCommit": synced_commit,
+                "currentCloneCommit": synced_commit,
+            },
+        )
 
     async def execute_rebuild(self, *, job: Any, log: Callable[[str], None]) -> None:
         """Delete generated workspace data, then regenerate notes and index."""
@@ -117,6 +159,13 @@ class SyncOrchestrator:
         log("Triggering force reindex...")
         await self.indexer_service.trigger_reindex(workspace_name=job.workspace_name, force=True)
         log("Rebuild complete.")
+        current_commit = workspace_service.resolve_workspace_clone_commit(entry)
+        if current_commit:
+            workspace_service.update_workspace_status(
+                workspace_repository=self.workspace_repository,
+                workspace_id=entry["id"],
+                patch={"currentCloneCommit": current_commit},
+            )
 
     def _reset_generated_workspace_data(self, *, entry: dict[str, Any], log: Callable[[str], None]) -> None:
         """Clear generated markdown and persisted index/cache for one workspace."""

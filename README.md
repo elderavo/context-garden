@@ -132,7 +132,7 @@ After registration, ContextGarden clones the repo, mirrors it into notes, and in
 
 In your GitLab repo → Settings → Webhooks:
 
-- **URL**: `http://<your-host>:7433/webhooks/gitlab`
+- **URL**: `http://<your-host>:7433/webhooks/gitlab/<workspace-id>`
 - **Secret token**: shown in the web UI after workspace registration (Workspaces tab)
 - **Trigger**: Push events
 

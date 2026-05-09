@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import secrets
 import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +18,23 @@ from ..ports.git_client import GitClient
 from ..ports.mirror_service import MirrorService
 from ..ports.workspace_repository import WorkspaceRepository
 
+log = logging.getLogger(__name__)
+
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$")
+_WORKSPACE_STATUS_DEFAULTS: dict[str, Any] = {
+    "lastWebhookReceivedAt": None,
+    "lastWebhookStatus": "",
+    "lastWebhookReason": "",
+    "lastWebhookRef": "",
+    "lastWebhookCommit": "",
+    "lastWebhookDeliveryId": "",
+    "lastSyncStartedAt": None,
+    "lastSyncCompletedAt": None,
+    "lastSyncStatus": "",
+    "lastSyncError": "",
+    "lastSyncedCommit": "",
+    "currentCloneCommit": "",
+}
 
 
 class JobLike(Protocol):
@@ -25,17 +43,117 @@ class JobLike(Protocol):
     completed_at: str | None
 
 
+_DEFAULT_CG_HOST = "http://localhost:7433"
+
+
 @dataclass(frozen=True)
 class RegisterWorkspaceResult:
     entry: dict[str, Any]
     notes_generated: int
     note_paths: list[str]
+    webhook_provision: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
 class UnregisterWorkspaceResult:
     removed: dict[str, Any] | None
     deleted_paths: list[str]
+
+
+def webhook_path_for_workspace(workspace_id: str) -> str:
+    return f"/webhooks/gitlab/{workspace_id}"
+
+
+def get_workspace_status(entry: dict[str, Any]) -> dict[str, Any]:
+    status = dict(_WORKSPACE_STATUS_DEFAULTS)
+    raw = entry.get("status")
+    if isinstance(raw, dict):
+        status.update(raw)
+    return status
+
+
+def resolve_workspace_clone_commit(entry: dict[str, Any]) -> str:
+    clone_dir = (
+        entry.get("gitlabConfig", {}).get("cloneDir")
+        if entry.get("sourceType") == "gitlab"
+        else entry.get("sourceDir")
+    )
+    if not clone_dir:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(clone_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    return result.stdout.strip()
+
+
+def update_workspace_status(
+    *,
+    workspace_repository: WorkspaceRepository,
+    workspace_id: str,
+    patch: dict[str, Any],
+) -> dict[str, Any] | None:
+    entries = workspace_repository.list_all()
+    updated: dict[str, Any] | None = None
+    for entry in entries:
+        if entry.get("id") != workspace_id:
+            continue
+        status = get_workspace_status(entry)
+        status.update(patch)
+        entry["status"] = status
+        updated = entry
+        break
+    if updated is None:
+        return None
+    workspace_repository.save_all(entries)
+    return updated
+
+
+def enrich_workspace_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    status = get_workspace_status(entry)
+    current_clone_commit = status.get("currentCloneCommit", "") or ""
+    last_synced_commit = status.get("lastSyncedCommit", "") or ""
+    raw_gc = entry.get("gitlabConfig", {}) or {}
+    # Expose non-sensitive provisioning fields only (no token, no secret)
+    gitlab_config_public = {
+        k: raw_gc[k]
+        for k in ("webhookId", "webhookUrl", "webhookInstalledAt", "webhookProvisionStatus", "webhookProvisionError")
+        if k in raw_gc
+    } if raw_gc else {}
+    return {
+        "id": entry["id"],
+        "name": entry["name"],
+        "sourceType": entry.get("sourceType", "local"),
+        "active": entry.get("active", True),
+        "registeredAt": entry.get("registeredAt", ""),
+        "languages": entry.get("languages", []),
+        "source": (
+            raw_gc.get("projectUrl")
+            if entry.get("sourceType") == "gitlab"
+            else entry.get("sourceDir")
+        ),
+        "sourceDir": entry.get("sourceDir"),
+        "branch": raw_gc.get("branch"),
+        "webhookPath": webhook_path_for_workspace(entry["id"]) if entry.get("sourceType") == "gitlab" else "",
+        "gitlabConfig": gitlab_config_public,
+        "status": status,
+        "lastSync": (
+            {
+                "status": status.get("lastSyncStatus", ""),
+                "completedAt": status.get("lastSyncCompletedAt"),
+                "commit": last_synced_commit,
+            }
+            if status.get("lastSyncStatus") or status.get("lastSyncCompletedAt") or last_synced_commit
+            else None
+        ),
+        "isCurrent": bool(current_clone_commit and current_clone_commit == last_synced_commit),
+        "drifted": bool(current_clone_commit and last_synced_commit and current_clone_commit != last_synced_commit),
+    }
 
 
 def list_workspace_summaries(
@@ -50,28 +168,10 @@ def list_workspace_summaries(
     result = []
     for entry in entries:
         last_job = jobs_by_workspace.get(entry["id"])
-        result.append(
-            {
-                "id": entry["id"],
-                "name": entry["name"],
-                "sourceType": entry.get("sourceType", "local"),
-                "active": entry.get("active", True),
-                "registeredAt": entry.get("registeredAt", ""),
-                "languages": entry.get("languages", []),
-                "source": (
-                    entry.get("gitlabConfig", {}).get("projectUrl")
-                    if entry.get("sourceType") == "gitlab"
-                    else entry.get("sourceDir")
-                ),
-                "sourceDir": entry.get("sourceDir"),
-                "branch": entry.get("gitlabConfig", {}).get("branch"),
-                "lastSync": (
-                    {"status": last_job.status, "completedAt": last_job.completed_at}
-                    if last_job
-                    else None
-                ),
-            }
-        )
+        summary = enrich_workspace_summary(entry)
+        if summary["lastSync"] is None and last_job:
+            summary["lastSync"] = {"status": last_job.status, "completedAt": last_job.completed_at}
+        result.append(summary)
     return result
 
 
@@ -150,9 +250,28 @@ async def register_workspace(
         entry["sshKeyFile"] = ssh_key_file
     if gitlab_config is not None:
         entry["gitlabConfig"] = gitlab_config
+    entry["status"] = get_workspace_status(entry)
+    if resolved_source_type == "gitlab":
+        current_clone_commit = resolve_workspace_clone_commit(entry)
+        entry["status"].update(
+            {
+                "currentCloneCommit": current_clone_commit,
+                "lastSyncedCommit": current_clone_commit,
+                "lastSyncStatus": "registered",
+            }
+        )
 
     updated = [*existing, entry]
     workspace_repository.save_all(updated)
+
+    webhook_provision: dict[str, Any] | None = None
+    if resolved_source_type == "gitlab":
+        cg_host = _resolve_cg_host()
+        token = gitlab_token or _resolve_token_from_env()
+        webhook_provision = await _provision_gitlab_webhook(entry, cg_host, token)
+        if webhook_provision:
+            entry["gitlabConfig"].update(webhook_provision)
+            workspace_repository.save_all([*[e for e in workspace_repository.list_all() if e["id"] != entry["id"]], entry])
 
     mirror_config = {
         "cloneDir": resolved_source_dir,
@@ -171,7 +290,102 @@ async def register_workspace(
         entry=entry,
         notes_generated=notes_generated,
         note_paths=note_paths if notes_generated > 0 else [],
+        webhook_provision=webhook_provision,
     )
+
+
+async def _provision_gitlab_webhook(
+    entry: dict[str, Any],
+    cg_host: str,
+    token: str | None,
+) -> dict[str, Any]:
+    """Try to create/update the GitLab hook for this workspace. Always returns a dict of gitlabConfig fields to merge."""
+    from ...infra.gitlab.project_hooks_client import (
+        GitLabHookError,
+        create_project_hook,
+        list_project_hooks,
+        parse_gitlab_api_base,
+        update_project_hook,
+    )
+
+    workspace_id = entry["id"]
+    gitlab_config = entry.get("gitlabConfig", {})
+    project_url = gitlab_config.get("projectUrl", "")
+    secret = gitlab_config.get("webhookSecret", "")
+    hook_url = f"{cg_host.rstrip('/')}/webhooks/gitlab/{workspace_id}"
+
+    if not token:
+        return {
+            "webhookProvisionStatus": "skipped",
+            "webhookProvisionError": "no token available",
+            "webhookUrl": hook_url,
+        }
+
+    try:
+        parse_gitlab_api_base(project_url)
+    except ValueError as exc:
+        return {
+            "webhookProvisionStatus": "skipped",
+            "webhookProvisionError": str(exc),
+            "webhookUrl": hook_url,
+        }
+
+    try:
+        hooks = await list_project_hooks(project_url, token)
+        existing = next((h for h in hooks if h.get("url") == hook_url), None)
+        if existing:
+            result = await update_project_hook(project_url, token, existing["id"], hook_url, secret)
+        else:
+            result = await create_project_hook(project_url, token, hook_url, secret)
+        return {
+            "webhookId": result.get("id"),
+            "webhookUrl": hook_url,
+            "webhookInstalledAt": datetime.now(timezone.utc).isoformat(),
+            "webhookProvisionStatus": "installed",
+            "webhookProvisionError": "",
+        }
+    except (GitLabHookError, Exception) as exc:
+        log.warning("Webhook provisioning failed for workspace %s: %s", workspace_id, exc)
+        return {
+            "webhookProvisionStatus": "failed",
+            "webhookProvisionError": str(exc),
+            "webhookUrl": hook_url,
+        }
+
+
+async def repair_workspace_webhook(
+    *,
+    workspace_id: str,
+    workspace_repository: WorkspaceRepository,
+    cg_host: str | None = None,
+) -> dict[str, Any]:
+    entries = workspace_repository.list_all()
+    entry = next((e for e in entries if e.get("id") == workspace_id), None)
+    if entry is None:
+        raise KeyError(f"Workspace {workspace_id!r} not found")
+    if entry.get("sourceType") != "gitlab":
+        raise ValueError("Webhook repair is only supported for GitLab workspaces")
+
+    resolved_host = cg_host or _resolve_cg_host()
+    token = entry.get("gitlabConfig", {}).get("accessToken") or _resolve_token_from_env()
+    provision = await _provision_gitlab_webhook(entry, resolved_host, token)
+
+    entry["gitlabConfig"].update(provision)
+    workspace_repository.save_all(entries)
+
+    hook_url = provision.get("webhookUrl", "")
+    secret = entry["gitlabConfig"].get("webhookSecret", "")
+    return {
+        "status": provision.get("webhookProvisionStatus"),
+        "webhookUrl": hook_url,
+        "hookId": provision.get("webhookId"),
+        "error": provision.get("webhookProvisionError") or None,
+        "manualFallback": {
+            "url": hook_url,
+            "secret": secret,
+            "events": ["push"],
+        },
+    }
 
 
 def unregister_workspace(
@@ -219,6 +433,10 @@ def _validate_languages(languages: list[Any]) -> None:
         raise ValueError("Languages must be non-empty strings.")
 
 
+def _resolve_cg_host() -> str:
+    return os.environ.get("CONTEXT_GARDEN_HOST", _DEFAULT_CG_HOST).rstrip("/")
+
+
 def _resolve_token_from_env() -> str | None:
     if os.environ.get("CG_GITLAB_TOKEN"):
         return os.environ["CG_GITLAB_TOKEN"]
@@ -249,4 +467,3 @@ def _collect_md_note_paths(*, data_dir: Path, workspace_name: str) -> list[str]:
             continue
         paths.append(rel)
     return paths
-

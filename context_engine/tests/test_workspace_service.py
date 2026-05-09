@@ -151,6 +151,182 @@ class WorkspaceServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
 
+    async def test_list_workspace_summaries_exposes_webhook_and_sync_status(self) -> None:
+        summaries = workspace_service.list_workspace_summaries(
+            entries=[
+                {
+                    "id": "ws-1",
+                    "name": "alpha",
+                    "sourceType": "gitlab",
+                    "sourceDir": "/tmp/alpha",
+                    "languages": ["py"],
+                    "active": True,
+                    "registeredAt": "2026-01-01T00:00:00+00:00",
+                    "gitlabConfig": {
+                        "projectUrl": "git@gitlab.example.com:org/alpha.git",
+                        "branch": "main",
+                        "cloneDir": "/tmp/alpha",
+                        "webhookSecret": "secret",
+                    },
+                    "status": {
+                        "lastWebhookStatus": "accepted",
+                        "lastWebhookCommit": "abc123",
+                        "lastSyncStatus": "done",
+                        "lastSyncCompletedAt": "2026-01-01T01:00:00+00:00",
+                        "lastSyncedCommit": "abc123",
+                        "currentCloneCommit": "abc123",
+                    },
+                }
+            ],
+            jobs=[],
+        )
+
+        self.assertEqual(len(summaries), 1)
+        summary = summaries[0]
+        self.assertEqual(summary["webhookPath"], "/webhooks/gitlab/ws-1")
+        self.assertEqual(summary["status"]["lastWebhookStatus"], "accepted")
+        self.assertEqual(summary["lastSync"]["status"], "done")
+        self.assertTrue(summary["isCurrent"])
+        self.assertFalse(summary["drifted"])
+
+
+    async def test_register_provisions_webhook_when_token_available(self) -> None:
+        data_dir = _make_test_dir("ws-service-prov-")
+        try:
+            from unittest.mock import AsyncMock, patch
+
+            repo = _Repo()
+            git = _Git()
+            mirror = _Mirror()
+            fake_hook = {"id": 99, "url": "http://localhost:7433/webhooks/gitlab/WSID"}
+
+            with patch(
+                "context_engine.app.services.workspace_service._provision_gitlab_webhook",
+                new=AsyncMock(return_value={
+                    "webhookId": 99,
+                    "webhookUrl": "http://localhost:7433/webhooks/gitlab/WSID",
+                    "webhookInstalledAt": "2026-01-01T00:00:00+00:00",
+                    "webhookProvisionStatus": "installed",
+                    "webhookProvisionError": "",
+                }),
+            ):
+                result = await workspace_service.register_workspace(
+                    payload={
+                        "name": "prov-workspace",
+                        "gitlab_url": "https://gitlab.example.com/org/repo",
+                        "gitlab_branch": "main",
+                        "gitlab_token": "mytoken",
+                        "languages": ["py"],
+                    },
+                    data_dir=data_dir,
+                    workspace_repository=repo,
+                    git_client=git,
+                    mirror_service=mirror,
+                )
+
+            self.assertEqual(result.webhook_provision["webhookProvisionStatus"], "installed")
+            self.assertEqual(result.entry["gitlabConfig"]["webhookId"], 99)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    async def test_register_skips_provision_without_token(self) -> None:
+        import os
+        data_dir = _make_test_dir("ws-service-noprov-")
+        try:
+            repo = _Repo()
+            git = _Git()
+            mirror = _Mirror()
+
+            with unittest.mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("CG_GITLAB_TOKEN", None)
+                result = await workspace_service.register_workspace(
+                    payload={
+                        "name": "noprov-workspace",
+                        "gitlab_url": "https://gitlab.example.com/org/repo",
+                        "gitlab_branch": "main",
+                        "languages": ["py"],
+                    },
+                    data_dir=data_dir,
+                    workspace_repository=repo,
+                    git_client=git,
+                    mirror_service=mirror,
+                )
+
+            # Without token, provision is skipped
+            self.assertIsNotNone(result.webhook_provision)
+            self.assertEqual(result.webhook_provision["webhookProvisionStatus"], "skipped")
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    async def test_repair_workspace_webhook_success(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        repo = _Repo()
+        entry = {
+            "id": "ws-repair",
+            "name": "repairme",
+            "sourceType": "gitlab",
+            "sourceDir": "/tmp/repairme",
+            "languages": ["py"],
+            "active": True,
+            "registeredAt": "2026-01-01T00:00:00+00:00",
+            "gitlabConfig": {
+                "projectUrl": "https://gitlab.home.lab/org/repo",
+                "branch": "main",
+                "cloneDir": "/tmp/repairme",
+                "webhookSecret": "oldsecret",
+                "accessToken": "mytoken",
+            },
+        }
+        repo.entries = [entry]
+
+        with patch(
+            "context_engine.app.services.workspace_service._provision_gitlab_webhook",
+            new=AsyncMock(return_value={
+                "webhookId": 77,
+                "webhookUrl": "http://localhost:7433/webhooks/gitlab/ws-repair",
+                "webhookInstalledAt": "2026-01-01T00:00:00+00:00",
+                "webhookProvisionStatus": "installed",
+                "webhookProvisionError": "",
+            }),
+        ):
+            result = await workspace_service.repair_workspace_webhook(
+                workspace_id="ws-repair",
+                workspace_repository=repo,
+            )
+
+        self.assertEqual(result["status"], "installed")
+        self.assertEqual(result["hookId"], 77)
+        self.assertEqual(repo.entries[0]["gitlabConfig"]["webhookId"], 77)
+
+    async def test_repair_workspace_webhook_not_found(self) -> None:
+        repo = _Repo()
+        with self.assertRaises(KeyError):
+            await workspace_service.repair_workspace_webhook(
+                workspace_id="nonexistent",
+                workspace_repository=repo,
+            )
+
+    async def test_repair_workspace_webhook_non_gitlab_raises(self) -> None:
+        repo = _Repo()
+        repo.entries = [{
+            "id": "ws-local",
+            "name": "local",
+            "sourceType": "local",
+            "sourceDir": "/tmp/local",
+            "languages": [],
+            "active": True,
+            "registeredAt": "2026-01-01T00:00:00+00:00",
+        }]
+        with self.assertRaises(ValueError):
+            await workspace_service.repair_workspace_webhook(
+                workspace_id="ws-local",
+                workspace_repository=repo,
+            )
+
+
+import unittest.mock
+
 
 if __name__ == "__main__":
     unittest.main()

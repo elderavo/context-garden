@@ -290,7 +290,7 @@ def create_mcp_server(
                 f'Notes generated: {result.notes_generated}\n'
                 f'Indexing: running in background\n\n'
                 f'Webhook setup (GitLab → Settings → Webhooks):\n'
-                f'  URL:    http://<cg-host>:7433/webhooks/gitlab\n'
+                f'  URL:    http://<cg-host>:7433/webhooks/gitlab/{entry.get("id")}\n'
                 f'  Secret: {gc.get("webhookSecret")}\n'
                 f'  Events: Push events only'
             )
