@@ -14,3 +14,10 @@ class DaemonIndexerService:
         daemon = self._get_daemon()
         await asyncio.to_thread(daemon.handle_index_rebuild, {"name": workspace_name, "force": force})
 
+    async def pause_indexing(self, *, workspace_id: str) -> None:
+        daemon = self._get_daemon()
+        await asyncio.to_thread(daemon.handle_index_pause, {"workspace_id": workspace_id})
+
+    async def resume_indexing(self, *, workspace_id: str) -> None:
+        daemon = self._get_daemon()
+        await asyncio.to_thread(daemon.handle_index_resume, {"workspace_id": workspace_id})

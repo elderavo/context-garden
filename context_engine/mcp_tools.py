@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+def _embed_api_key_needed(provider: str, host: str, api_key: str) -> bool:
+    if provider != "openai" or api_key:
+        return False
+    normalized_host = host.rstrip("/").removesuffix("/v1")
+    return normalized_host == "https://api.openai.com"
+
 DEFAULT_MAX_CHARS = 15_000
 
 
@@ -412,11 +419,11 @@ def create_mcp_server(
 
         # Apply provider defaults
         resolved_embed_model = embed_model or (
-            "text-embedding-3-small" if embed_provider == "openai" else
+            "nomic" if embed_provider == "openai" else
             "nomic-embed-text:latest" if embed_provider in ("local", "ollama") else None
         )
         resolved_embed_host = embed_host or (
-            "https://api.openai.com" if embed_provider == "openai" else
+            "http://10.0.132.7:8080" if embed_provider == "openai" else
             "http://localhost:11434" if embed_provider in ("local", "ollama") else None
         )
         resolved_llm_model = llm_model or (
@@ -477,7 +484,9 @@ def create_mcp_server(
 
         # Status report
         snap = get_config_snapshot()
-        embed_key_needed = snap["embedProvider"] == "openai" and not snap["embedApiKey"]
+        embed_key_needed = _embed_api_key_needed(
+            snap["embedProvider"], snap["embedHost"], snap["embedApiKey"]
+        )
         llm_key_needed = snap["llmProvider"] in ("openai", "anthropic") and not snap["llmApiKey"]
 
         lines += [

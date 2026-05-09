@@ -1216,11 +1216,11 @@
       </div>
       <div class="form-group">
         <label class="form-label">Model</label>
-        <input class="form-input" id="cfg-embed-model" type="text" placeholder="nomic-embed-text:latest">
+        <input class="form-input" id="cfg-embed-model" type="text" placeholder="nomic">
       </div>
       <div class="form-group">
         <label class="form-label">Host</label>
-        <input class="form-input" id="cfg-embed-host" type="text" placeholder="http://localhost:11434">
+        <input class="form-input" id="cfg-embed-host" type="text" placeholder="http://10.0.132.7:8080">
       </div>
       <div class="form-group">
         <label class="form-label">API Key</label>
@@ -1256,6 +1256,41 @@
       </div>
       <button class="btn-save" id="btn-save-llm" onclick="saveConfig('llm')">Save LLM</button>
       <div class="form-msg" id="cfg-llm-msg"></div>
+    </div>
+
+    <div class="card">
+      <div class="settings-section-title">LLM Provider (Summarizer)</div>
+      <div class="form-group">
+        <label class="form-label">
+          <input id="cfg-summary-enabled" type="checkbox" checked style="margin-right:8px;">
+          Enabled
+        </label>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Provider</label>
+        <input class="form-input" id="cfg-summary-provider" type="text" placeholder="ollama / openai / anthropic">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Model</label>
+        <input class="form-input" id="cfg-summary-model" type="text" placeholder="granite4.1:8b">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Host</label>
+        <input class="form-input" id="cfg-summary-host" type="text" placeholder="http://10.0.132.7:8080">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max Tokens</label>
+        <input class="form-input" id="cfg-summary-max-tokens" type="number" min="1" step="1" placeholder="1024">
+      </div>
+      <div class="form-group">
+        <label class="form-label">API Key</label>
+        <div class="key-row">
+          <input class="form-input" id="cfg-summary-key" type="password" placeholder="Leave blank to keep existing">
+          <span class="key-set-badge unset" id="cfg-summary-key-badge">not set</span>
+        </div>
+      </div>
+      <button class="btn-save" id="btn-save-summary" onclick="saveConfig('summary')">Save Summarizer</button>
+      <div class="form-msg" id="cfg-summary-msg"></div>
     </div>
   </div>
 
@@ -2267,6 +2302,16 @@
       llmBadge.textContent = data.llmApiKeySet ? '✓ set' : 'not set';
       llmBadge.className   = 'key-set-badge ' + (data.llmApiKeySet ? 'set' : 'unset');
 
+      document.getElementById('cfg-summary-enabled').checked = data.summaryEnabled !== false;
+      document.getElementById('cfg-summary-provider').value   = data.summaryProvider || '';
+      document.getElementById('cfg-summary-model').value      = data.summaryModel    || '';
+      document.getElementById('cfg-summary-host').value       = data.summaryHost     || '';
+      document.getElementById('cfg-summary-max-tokens').value = data.summaryMaxTokens || '';
+      document.getElementById('cfg-summary-key').value        = '';
+      const summaryBadge = document.getElementById('cfg-summary-key-badge');
+      summaryBadge.textContent = data.summaryApiKeySet ? '✓ set' : 'not set';
+      summaryBadge.className   = 'key-set-badge ' + (data.summaryApiKeySet ? 'set' : 'unset');
+
       const sshEl = document.getElementById('cfg-ssh-key-file');
       if (sshEl) sshEl.value = data.sshKeyFile || '';
     } catch (e) {
@@ -2275,12 +2320,21 @@
   }
 
   async function saveConfig(section) {
-    const isEmbed = section === 'embed';
-    const btn = document.getElementById(isEmbed ? 'btn-save-embed' : 'btn-save-llm');
-    const msg = document.getElementById(isEmbed ? 'cfg-embed-msg' : 'cfg-llm-msg');
+    const btnMap = {
+      embed: 'btn-save-embed',
+      llm: 'btn-save-llm',
+      summary: 'btn-save-summary',
+    };
+    const msgMap = {
+      embed: 'cfg-embed-msg',
+      llm: 'cfg-llm-msg',
+      summary: 'cfg-summary-msg',
+    };
+    const btn = document.getElementById(btnMap[section]);
+    const msg = document.getElementById(msgMap[section]);
 
     const patch = {};
-    if (isEmbed) {
+    if (section === 'embed') {
       const p = document.getElementById('cfg-embed-provider').value.trim();
       const m = document.getElementById('cfg-embed-model').value.trim();
       const h = document.getElementById('cfg-embed-host').value.trim();
@@ -2289,7 +2343,7 @@
       if (m) patch.embedModel    = m;
       if (h) patch.embedHost     = h;
       if (k) patch.embedApiKey   = k;
-    } else {
+    } else if (section === 'llm') {
       const p = document.getElementById('cfg-llm-provider').value.trim();
       const m = document.getElementById('cfg-llm-model').value.trim();
       const h = document.getElementById('cfg-llm-host').value.trim();
@@ -2298,9 +2352,21 @@
       if (m) patch.llmModel    = m;
       if (h) patch.llmHost     = h;
       if (k) patch.llmApiKey   = k;
+    } else {
+      patch.summaryEnabled = document.getElementById('cfg-summary-enabled').checked;
+      const p = document.getElementById('cfg-summary-provider').value.trim();
+      const m = document.getElementById('cfg-summary-model').value.trim();
+      const h = document.getElementById('cfg-summary-host').value.trim();
+      const t = document.getElementById('cfg-summary-max-tokens').value.trim();
+      const k = document.getElementById('cfg-summary-key').value.trim();
+      if (p) patch.summaryProvider = p;
+      if (m) patch.summaryModel = m;
+      if (h) patch.summaryHost = h;
+      if (t) patch.summaryMaxTokens = Number(t);
+      if (k) patch.summaryApiKey = k;
     }
 
-    if (Object.keys(patch).length === 0) {
+    if (section !== 'summary' && Object.keys(patch).length === 0) {
       msg.textContent = 'Nothing to save.';
       msg.className = 'form-msg';
       return;

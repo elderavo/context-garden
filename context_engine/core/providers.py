@@ -121,7 +121,16 @@ class OpenAIBackend(EmbeddingBackend):
 
     def create_llama_embedding(self) -> Any:
         from llama_index.embeddings.openai import OpenAIEmbedding
-        return OpenAIEmbedding(model=self.model, api_key=self.api_key)
+        api_key = self.api_key
+        # OpenAI-compatible local servers like llama.cpp often do not require auth,
+        # but the client still expects a non-empty api_key field.
+        if not api_key and self.host != "https://api.openai.com":
+            api_key = "sk-local"
+        return OpenAIEmbedding(
+            model_name=self.model,
+            api_key=api_key,
+            api_base=f"{self.host}/v1",
+        )
 
 
 class LocalBackend(EmbeddingBackend):

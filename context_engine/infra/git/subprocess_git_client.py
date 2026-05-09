@@ -113,7 +113,31 @@ class SubprocessGitClient:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr_bytes = await proc.communicate()
+        try:
+            _, stderr_bytes = await proc.communicate()
+        except asyncio.CancelledError:
+            await asyncio.shield(SubprocessGitClient._terminate_and_reap(proc))
+            raise
         if proc.returncode != 0:
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
             raise RuntimeError(f"git {args[0]} failed (exit {proc.returncode}): {stderr}")
+
+    @staticmethod
+    async def _terminate_and_reap(proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            await proc.wait()
+            return
+
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()

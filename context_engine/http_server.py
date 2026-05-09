@@ -302,6 +302,12 @@ async def _handle_config_get(_req: Request) -> JSONResponse:
         "llmModel":       snap["llmModel"],
         "llmHost":        snap["llmHost"],
         "llmApiKeySet":   bool(snap["llmApiKey"]),
+        "summaryEnabled": snap["summaryEnabled"],
+        "summaryProvider": snap["summaryProvider"],
+        "summaryModel": snap["summaryModel"],
+        "summaryHost": snap["summaryHost"],
+        "summaryMaxTokens": snap["summaryMaxTokens"],
+        "summaryApiKeySet": bool(snap["summaryApiKey"]),
         "sshKeyFile":     snap.get("sshKeyFile", ""),
     })
 
@@ -314,7 +320,9 @@ async def _handle_config_update(req: Request) -> JSONResponse:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
     allowed = {"embedProvider", "embedModel", "embedHost", "embedApiKey",
-               "llmProvider", "llmModel", "llmHost", "llmApiKey"}
+               "llmProvider", "llmModel", "llmHost", "llmApiKey",
+               "summaryEnabled", "summaryProvider", "summaryModel",
+               "summaryHost", "summaryMaxTokens", "summaryApiKey"}
     patch = {k: v for k, v in body.items() if k in allowed and v is not None}
     if not patch:
         return JSONResponse({"error": "No valid fields provided"}, status_code=400)

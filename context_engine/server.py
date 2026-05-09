@@ -194,6 +194,13 @@ class _WorkspaceWatcher:
         if not changed and not deleted:
             return
 
+        if not self._runtime._pause_event.is_set():
+            log.info(
+                "Workspace '%s': watcher flush suppressed while paused — %d changed, %d deleted",
+                self._runtime.record.name, len(changed), len(deleted),
+            )
+            return
+
         log.info(
             "Workspace '%s': watcher flush — %d changed, %d deleted",
             self._runtime.record.name, len(changed), len(deleted),

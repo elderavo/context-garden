@@ -41,7 +41,11 @@ class NodeMirrorService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        try:
+            stdout_bytes, stderr_bytes = await proc.communicate()
+        except asyncio.CancelledError:
+            await asyncio.shield(self._terminate_and_reap(proc))
+            raise
         stdout = stdout_bytes.decode("utf-8", errors="replace").strip() if stdout_bytes else ""
 
         try:
@@ -54,3 +58,23 @@ class NodeMirrorService:
             raise RuntimeError(f"Mirror CLI error: {result['error']}")
 
         return result
+
+    @staticmethod
+    async def _terminate_and_reap(proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            await proc.wait()
+            return
+
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()

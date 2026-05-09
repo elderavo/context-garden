@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from ...infra.git.subprocess_git_client import SubprocessGitClient
 from ...infra.indexer.daemon_indexer_service import DaemonIndexerService
+from ...infra.mirror.code_note_summarizer import CodeNoteSummarizer
 from ...infra.mirror.mirror_service import NodeMirrorService
 from ...infra.repo.workspace_json_repo import WorkspaceJsonRepository
 from ..ports.git_client import GitClient
@@ -24,6 +25,7 @@ class SyncOrchestrator:
     git_client: GitClient
     mirror_service: MirrorService
     indexer_service: IndexerService
+    note_summarizer: CodeNoteSummarizer | None = None
     data_dir: Path | None = None
 
     async def execute_sync(self, *, job: Any, log: Callable[[str], None]) -> None:
@@ -36,29 +38,45 @@ class SyncOrchestrator:
 
         gitlab_config = entry["gitlabConfig"]
         token = self._resolve_token(gitlab_config)
+        indexing_paused = False
 
-        log(f"Fetching {gitlab_config['projectUrl']} ({gitlab_config['branch']})...")
-        await self.git_client.fetch_and_reset(
-            project_url=gitlab_config["projectUrl"],
-            clone_dir=gitlab_config["cloneDir"],
-            branch=gitlab_config["branch"],
-            token=token,
-            ssh_key_file=entry.get("sshKeyFile"),
-        )
-        log("Fetch complete.")
-
-        log("Mirroring...")
-        mirror_error: str | None = None
         try:
+            log("Pausing watcher-driven indexing...")
+            await self.indexer_service.pause_indexing(workspace_id=entry["id"])
+            indexing_paused = True
+
+            log(f"Fetching {gitlab_config['projectUrl']} ({gitlab_config['branch']})...")
+            await self.git_client.fetch_and_reset(
+                project_url=gitlab_config["projectUrl"],
+                clone_dir=gitlab_config["cloneDir"],
+                branch=gitlab_config["branch"],
+                token=token,
+                ssh_key_file=entry.get("sshKeyFile"),
+            )
+            log("Fetch complete.")
+
+            log("Mirroring...")
             result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=gitlab_config)
             written = sum(result.get("written", {}).values()) if isinstance(result.get("written"), dict) else 0
             log(f"Mirror complete. Notes written: {written}.")
-        except Exception as exc:
-            mirror_error = str(exc)
-            log(f"Mirror failed (will still reindex existing notes): {exc}")
 
-        if mirror_error:
-            raise RuntimeError(f"Mirror failed: {mirror_error}")
+            if self.note_summarizer is not None:
+                log("Summarizing mirrored notes...")
+                summary_result = await self.note_summarizer.summarize_workspace(
+                    workspace_name=entry["name"],
+                    log_fn=log,
+                )
+                summarized = sum(summary_result.get("summarized", {}).values())
+                skipped = sum(summary_result.get("skipped", {}).values())
+                log(f"Summary stage complete. Summaries written: {summarized}. Skipped: {skipped}.")
+        finally:
+            if indexing_paused:
+                log("Resuming watcher-driven indexing...")
+                await self.indexer_service.resume_indexing(workspace_id=entry["id"])
+
+        log("Triggering post-sync reindex...")
+        await self.indexer_service.trigger_reindex(workspace_name=entry["name"])
+        log("Post-sync reindex complete.")
 
     async def execute_rebuild(self, *, job: Any, log: Callable[[str], None]) -> None:
         """Delete generated workspace data, then regenerate notes and index."""
@@ -67,17 +85,34 @@ class SyncOrchestrator:
             raise KeyError(f"Workspace {job.workspace_id} not found in registry")
 
         mirror_config = entry.get("gitlabConfig") or {"cloneDir": entry["sourceDir"]}
+        indexing_paused = False
 
-        if self.data_dir is not None:
-            self._reset_generated_workspace_data(entry=entry, log=log)
-
-        log("Mirroring from empty workspace data...")
         try:
+            log("Pausing watcher-driven indexing...")
+            await self.indexer_service.pause_indexing(workspace_id=entry["id"])
+            indexing_paused = True
+
+            if self.data_dir is not None:
+                self._reset_generated_workspace_data(entry=entry, log=log)
+
+            log("Mirroring from empty workspace data...")
             result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=mirror_config)
             written = sum(result.get("written", {}).values()) if isinstance(result.get("written"), dict) else 0
             log(f"Mirror complete. Notes written: {written}.")
-        except Exception as exc:
-            raise RuntimeError(f"Mirror failed: {exc}") from exc
+
+            if self.note_summarizer is not None:
+                log("Summarizing mirrored notes...")
+                summary_result = await self.note_summarizer.summarize_workspace(
+                    workspace_name=entry["name"],
+                    log_fn=log,
+                )
+                summarized = sum(summary_result.get("summarized", {}).values())
+                skipped = sum(summary_result.get("skipped", {}).values())
+                log(f"Summary stage complete. Summaries written: {summarized}. Skipped: {skipped}.")
+        finally:
+            if indexing_paused:
+                log("Resuming watcher-driven indexing...")
+                await self.indexer_service.resume_indexing(workspace_id=entry["id"])
 
         log("Triggering force reindex...")
         await self.indexer_service.trigger_reindex(workspace_name=job.workspace_name, force=True)
@@ -163,5 +198,6 @@ def build_default(
             mirror_cli=mirror_cli,
         ),
         indexer_service=DaemonIndexerService(get_daemon),
+        note_summarizer=CodeNoteSummarizer(data_dir=data_dir),
         data_dir=data_dir,
     )

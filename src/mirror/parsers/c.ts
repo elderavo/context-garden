@@ -642,7 +642,6 @@ function generateModuleNote(
   );
 
   lines.push(`# ${dirName}`, "");
-  lines.push("*Module summary not yet generated.*", "");
 
   if (parentModuleLink) {
     lines.push("## Parent", "");

@@ -19,7 +19,9 @@ Push to GitLab → webhook fires → ContextGarden git-pulls, re-mirrors, and re
 ## Requirements
 
 - Docker + Docker Compose
-- An embedding provider: **Ollama** (local, default) or OpenAI
+- An embedding provider:
+  `openai`-compatible API at `http://10.0.132.7:8080` is the default in this repo
+  (tested with `llama.cpp`), or Ollama/OpenAI
 - An LLM provider: **Ollama**, OpenAI, or Anthropic
 - A GitLab instance (self-hosted or gitlab.com) with webhook support
 
@@ -50,20 +52,35 @@ services:
 
 If your GitLab runs on a non-standard SSH port (e.g. 2222), add `-p 2222` to the SSH command.
 
-### 2. Start
+### 2. Build and start
 
 ```bash
-sudo docker compose up -d
+sudo docker compose build context-garden
+sudo docker compose up -d context-garden
 ```
 
 The web UI is at **http://localhost:7433**.
+
+If you changed Python dependencies, the Dockerfile, or anything under `context_engine/`,
+rebuild before restarting:
+
+```bash
+sudo docker compose build --no-cache context-garden
+sudo docker compose up -d context-garden
+```
+
+To confirm the running image picked up the new code:
+
+```bash
+sudo docker compose logs -f context-garden
+```
 
 ### 3. Configure providers
 
 Open the web UI → **Settings** tab. Set your embedding and LLM providers.
 
-**Ollama (local embeddings) + OpenAI (LLM)** — recommended:
-- Embed provider: `ollama`, model: `nomic-embed-text:latest`, host: `http://host.docker.internal:11434`
+**llama.cpp embeddings at `10.0.132.7:8080` + OpenAI (LLM)** — recommended:
+- Embed provider: `openai`, model: `nomic`, host: `http://10.0.132.7:8080`
 - LLM provider: `openai`, model: `gpt-4o-mini`, API key: `sk-...`
 
 **Fully local (Ollama for both)**:
@@ -194,6 +211,12 @@ Provider config (embed host, model, API keys) is managed via the Settings UI or 
 - Indexing runs in background — check the Jobs tab for progress
 - Verify Ollama is reachable: `curl http://localhost:11434/api/tags` (from the host)
 - If running Ollama on the host, use `http://host.docker.internal:11434` as the embed host
+
+**llama.cpp embeddings not working**
+- Verify the OpenAI-compatible endpoint responds: `curl http://10.0.132.7:8080/v1/models`
+- Use an actual model ID exposed by that server, for example `nomic`
+- If you changed dependencies or provider code, rebuild the container:
+  `sudo docker compose build --no-cache context-garden && sudo docker compose up -d context-garden`
 
 **Webhook not triggering sync**
 - Confirm the secret token in GitLab matches the one shown in the Workspaces tab

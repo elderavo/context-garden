@@ -31,9 +31,9 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _EMBED_DEFAULTS: dict[str, Any] = {
-    "provider": "ollama",
-    "model": "nomic-embed-text:latest",
-    "host": "http://localhost:11434",
+    "provider": "openai",
+    "model": "nomic",
+    "host": "http://10.0.132.7:8080",
     "context_length": 512,
     "api_key": "",
 }
@@ -44,6 +44,15 @@ _SYNTH_DEFAULTS: dict[str, Any] = {
     "host": "http://localhost:11434",
     "context_window": 32768,
     "max_tokens": 4096,
+    "api_key": "",
+}
+
+_CODE_SUMMARY_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    "provider": "ollama",
+    "model": "cogito:8b",
+    "host": "http://localhost:11434",
+    "max_tokens": 1024,
     "api_key": "",
 }
 
@@ -121,6 +130,7 @@ def load_config() -> dict[str, Any]:
         {
             "embedding":   {provider, model, host, context_length, api_key},
             "synthesizer": {provider, model, host, context_window, max_tokens, api_key},
+            "code_summaries": {enabled, provider, model, host, max_tokens, api_key},
         }
     """
     config_path = _DATA_DIR / ".context-garden" / "config.json"
@@ -164,7 +174,20 @@ def load_config() -> dict[str, Any]:
         synth_raw.get("apiKeyRef"), synth_raw.get("apiKey"), secrets
     )
 
-    return {"embedding": embed, "synthesizer": synth}
+    summary_raw = raw.get("codeSummaries", {})
+    summaries: dict[str, Any] = dict(_CODE_SUMMARY_DEFAULTS)
+    if "enabled" in summary_raw:
+        summaries["enabled"] = bool(summary_raw.get("enabled"))
+    for field in ("provider", "model", "host"):
+        if summary_raw.get(field):
+            summaries[field] = summary_raw[field]
+    if summary_raw.get("maxTokens"):
+        summaries["max_tokens"] = int(summary_raw["maxTokens"])
+    summaries["api_key"] = _resolve_key(
+        summary_raw.get("apiKeyRef"), summary_raw.get("apiKey"), secrets
+    )
+
+    return {"embedding": embed, "synthesizer": synth, "code_summaries": summaries}
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +232,19 @@ def get_synth_config() -> dict[str, Any]:
     return _cached["synthesizer"]
 
 
+def get_code_summary_config() -> dict[str, Any]:
+    """Return code-note summarization config."""
+    global _cached
+    if _cached is None:
+        _cached = load_config()
+    return _cached["code_summaries"]
+
+
 def get_config_snapshot() -> dict[str, Any]:
     """Return a flat snapshot suitable for the MCP configure/setup tools."""
     embed = get_embed_config()
     synth = get_synth_config()
+    summaries = get_code_summary_config()
     env_file = _DATA_DIR / ".context-garden" / "secrets.env"
     secrets = _load_dotenv(env_file)
     return {
@@ -227,6 +259,12 @@ def get_config_snapshot() -> dict[str, Any]:
         "llmContextWindow": synth.get("context_window", 32768),
         "llmMaxTokens": synth.get("max_tokens", 4096),
         "llmApiKey": synth.get("api_key", ""),
+        "summaryEnabled": summaries.get("enabled", True),
+        "summaryProvider": summaries.get("provider", ""),
+        "summaryModel": summaries.get("model", ""),
+        "summaryHost": summaries.get("host", ""),
+        "summaryMaxTokens": summaries.get("max_tokens", 1024),
+        "summaryApiKey": summaries.get("api_key", ""),
         "sshKeyFile": secrets.get("CG_GIT_SSH_KEY_FILE", ""),
     }
 
@@ -235,7 +273,8 @@ def write_config(patch: dict[str, Any], persist: bool = True) -> None:
     """Apply a flat patch (same shape as get_config_snapshot) to config.json.
 
     Keys understood: embedProvider, embedModel, embedHost, embedApiKey,
-    llmProvider, llmModel, llmHost, llmApiKey.
+    llmProvider, llmModel, llmHost, llmApiKey, summaryEnabled,
+    summaryProvider, summaryModel, summaryHost, summaryApiKey.
     API keys are written to ~/.context-garden/.env (never config.json).
     """
     global _cached
@@ -252,6 +291,7 @@ def write_config(patch: dict[str, Any], persist: bool = True) -> None:
 
     embed_raw = raw.setdefault("embedding", {})
     synth_raw = raw.setdefault("synthesizer", {})
+    summary_raw = raw.setdefault("codeSummaries", {})
 
     mapping_embed = {
         "embedProvider": "provider",
@@ -263,6 +303,11 @@ def write_config(patch: dict[str, Any], persist: bool = True) -> None:
         "llmModel": "model",
         "llmHost": "host",
     }
+    mapping_summary = {
+        "summaryProvider": "provider",
+        "summaryModel": "model",
+        "summaryHost": "host",
+    }
 
     for flat_key, raw_key in mapping_embed.items():
         if flat_key in patch and patch[flat_key]:
@@ -270,6 +315,13 @@ def write_config(patch: dict[str, Any], persist: bool = True) -> None:
     for flat_key, raw_key in mapping_synth.items():
         if flat_key in patch and patch[flat_key]:
             synth_raw[raw_key] = patch[flat_key]
+    for flat_key, raw_key in mapping_summary.items():
+        if flat_key in patch and patch[flat_key]:
+            summary_raw[raw_key] = patch[flat_key]
+    if "summaryEnabled" in patch:
+        summary_raw["enabled"] = bool(patch["summaryEnabled"])
+    if patch.get("summaryMaxTokens"):
+        summary_raw["maxTokens"] = int(patch["summaryMaxTokens"])
 
     # API keys go to secrets.env in the data dir (persists in Docker volume), never config.json
     env_file = _DATA_DIR / ".context-garden" / "secrets.env"
@@ -293,6 +345,9 @@ def write_config(patch: dict[str, Any], persist: bool = True) -> None:
     if patch.get("llmApiKey"):
         env_lines = _upsert_env(env_lines, "CG_LLM_API_KEY", patch["llmApiKey"])
         synth_raw["apiKeyRef"] = "env:CG_LLM_API_KEY"
+    if patch.get("summaryApiKey"):
+        env_lines = _upsert_env(env_lines, "CG_SUMMARY_API_KEY", patch["summaryApiKey"])
+        summary_raw["apiKeyRef"] = "env:CG_SUMMARY_API_KEY"
     if "sshKeyFile" in patch:
         env_lines = _upsert_env(env_lines, "CG_GIT_SSH_KEY_FILE", patch["sshKeyFile"])
 

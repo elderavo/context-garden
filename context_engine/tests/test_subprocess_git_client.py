@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from context_engine.infra.git.subprocess_git_client import SubprocessGitClient
 
@@ -14,6 +15,23 @@ class _ProcSuccess:
 
     async def communicate(self):
         return b"", b""
+
+    async def wait(self):
+        return self.returncode
+
+
+class _ProcCancelled:
+    def __init__(self) -> None:
+        self.returncode = None
+        self.terminate = Mock(side_effect=self._mark_exited)
+        self.kill = Mock(side_effect=self._mark_exited)
+        self.wait = AsyncMock(return_value=0)
+
+    async def communicate(self):
+        raise asyncio.CancelledError
+
+    def _mark_exited(self) -> None:
+        self.returncode = -15
 
 
 def _make_test_dir(prefix: str) -> Path:
@@ -112,6 +130,33 @@ class SubprocessGitClientTests(unittest.IsolatedAsyncioTestCase):
 
             env = create_proc.await_args.kwargs["env"]
             self.assertEqual(env["GIT_SSH_COMMAND"], custom_command)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    async def test_clone_repo_reaps_git_process_when_cancelled(self) -> None:
+        tmp = _make_test_dir("git-client-")
+        fake_proc = _ProcCancelled()
+        create_proc = AsyncMock(return_value=fake_proc)
+
+        try:
+            with (
+                patch(
+                    "context_engine.infra.git.subprocess_git_client.asyncio.create_subprocess_exec",
+                    new=create_proc,
+                ),
+                patch.dict("context_engine.infra.git.subprocess_git_client.os.environ", {}, clear=True),
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await SubprocessGitClient().clone_repo(
+                        project_url="git@10.0.132.100:elderavo/context_garden",
+                        clone_dir=str(tmp / "repo"),
+                        branch="main",
+                        token=None,
+                    )
+
+            fake_proc.terminate.assert_called_once()
+            fake_proc.wait.assert_awaited_once()
+            fake_proc.kill.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
