@@ -6,6 +6,7 @@ services:
       - "7433:7433"
     volumes:
       - ./data:/data
+      - /home/alex/code:/home/alex/code:ro
       - /opt/context-garden/ssh/id_ed25519:/run/secrets/git_ssh_key:ro
       - /opt/context-garden/ssh/known_hosts:/root/.ssh/known_hosts:ro
     environment:
