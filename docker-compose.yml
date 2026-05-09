@@ -12,6 +12,8 @@ services:
       CG_OLLAMA_HOST: "${CG_OLLAMA_HOST:-http://localhost:11434}"
       CG_WEBAPP_PORT: "7433"
       CG_GIT_SSH_COMMAND: "ssh -F /dev/null -i /run/secrets/git_ssh_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts -p 2222"
+      CG_GITLAB_TOKEN: "${CG_GITLAB_TOKEN:-}"
+      CONTEXT_GARDEN_HOST: "${CONTEXT_GARDEN_HOST:-}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

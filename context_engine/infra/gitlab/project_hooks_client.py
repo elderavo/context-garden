@@ -50,11 +50,15 @@ def parse_gitlab_api_base(project_url: str) -> tuple[str, str]:
     raise ValueError(f"Unsupported GitLab project URL format: {project_url!r}")
 
 
-async def list_project_hooks(project_url: str, token: str) -> list[dict]:
+def _client() -> "httpx.AsyncClient":
     import httpx
+    return httpx.AsyncClient(timeout=10, verify=False)
+
+
+async def list_project_hooks(project_url: str, token: str) -> list[dict]:
     api_base, encoded_path = parse_gitlab_api_base(project_url)
     url = f"{api_base}/projects/{encoded_path}/hooks"
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with _client() as client:
         resp = await client.get(url, headers={"PRIVATE-TOKEN": token})
     if resp.status_code != 200:
         raise GitLabHookError(resp.status_code, resp.text)
@@ -68,11 +72,10 @@ async def create_project_hook(
     secret: str,
     push_events: bool = True,
 ) -> dict:
-    import httpx
     api_base, encoded_path = parse_gitlab_api_base(project_url)
     url = f"{api_base}/projects/{encoded_path}/hooks"
     payload = {"url": hook_url, "token": secret, "push_events": push_events}
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with _client() as client:
         resp = await client.post(url, json=payload, headers={"PRIVATE-TOKEN": token})
     if resp.status_code not in (200, 201):
         raise GitLabHookError(resp.status_code, resp.text)
@@ -87,11 +90,10 @@ async def update_project_hook(
     secret: str,
     push_events: bool = True,
 ) -> dict:
-    import httpx
     api_base, encoded_path = parse_gitlab_api_base(project_url)
     url = f"{api_base}/projects/{encoded_path}/hooks/{hook_id}"
     payload = {"url": hook_url, "token": secret, "push_events": push_events}
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with _client() as client:
         resp = await client.put(url, json=payload, headers={"PRIVATE-TOKEN": token})
     if resp.status_code != 200:
         raise GitLabHookError(resp.status_code, resp.text)
