@@ -35,11 +35,9 @@ class SyncOrchestrator:
         if not entry:
             raise KeyError(f"Workspace {job.workspace_id} not found in registry")
 
-        if entry.get("sourceType") != "gitlab" or not entry.get("gitlabConfig"):
-            raise ValueError(f"Workspace \"{entry['name']}\" is not a GitLab workspace")
-
-        gitlab_config = entry["gitlabConfig"]
-        token = self._resolve_token(gitlab_config)
+        is_gitlab = entry.get("sourceType") == "gitlab" and bool(entry.get("gitlabConfig"))
+        gitlab_config = entry.get("gitlabConfig") if is_gitlab else None
+        mirror_config = gitlab_config or {"cloneDir": entry["sourceDir"]}
         indexing_paused = False
         synced_commit = ""
         workspace_service.update_workspace_status(
@@ -58,24 +56,28 @@ class SyncOrchestrator:
             await self.indexer_service.pause_indexing(workspace_id=entry["id"])
             indexing_paused = True
 
-            log(f"Fetching {gitlab_config['projectUrl']} ({gitlab_config['branch']})...")
-            await self.git_client.fetch_and_reset(
-                project_url=gitlab_config["projectUrl"],
-                clone_dir=gitlab_config["cloneDir"],
-                branch=gitlab_config["branch"],
-                token=token,
-                ssh_key_file=entry.get("sshKeyFile"),
-            )
-            log("Fetch complete.")
-            synced_commit = workspace_service.resolve_workspace_clone_commit(entry)
-            workspace_service.update_workspace_status(
-                workspace_repository=self.workspace_repository,
-                workspace_id=entry["id"],
-                patch={"currentCloneCommit": synced_commit},
-            )
+            if is_gitlab:
+                token = self._resolve_token(gitlab_config)
+                log(f"Fetching {gitlab_config['projectUrl']} ({gitlab_config['branch']})...")
+                await self.git_client.fetch_and_reset(
+                    project_url=gitlab_config["projectUrl"],
+                    clone_dir=gitlab_config["cloneDir"],
+                    branch=gitlab_config["branch"],
+                    token=token,
+                    ssh_key_file=entry.get("sshKeyFile"),
+                )
+                log("Fetch complete.")
+                synced_commit = workspace_service.resolve_workspace_clone_commit(entry)
+                workspace_service.update_workspace_status(
+                    workspace_repository=self.workspace_repository,
+                    workspace_id=entry["id"],
+                    patch={"currentCloneCommit": synced_commit},
+                )
+            else:
+                log(f"Local workspace — scanning {entry['sourceDir']} for changes...")
 
             log("Mirroring...")
-            result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=gitlab_config)
+            result = await self.mirror_service.run(workspace_entry=entry, gitlab_config=mirror_config)
             written = sum(result.get("written", {}).values()) if isinstance(result.get("written"), dict) else 0
             log(f"Mirror complete. Notes written: {written}.")
 
@@ -108,16 +110,18 @@ class SyncOrchestrator:
         log("Triggering post-sync reindex...")
         await self.indexer_service.trigger_reindex(workspace_name=entry["name"])
         log("Post-sync reindex complete.")
+        status_patch: dict[str, Any] = {
+            "lastSyncCompletedAt": datetime.now(timezone.utc).isoformat(),
+            "lastSyncStatus": "done",
+            "lastSyncError": "",
+        }
+        if synced_commit:
+            status_patch["lastSyncedCommit"] = synced_commit
+            status_patch["currentCloneCommit"] = synced_commit
         workspace_service.update_workspace_status(
             workspace_repository=self.workspace_repository,
             workspace_id=entry["id"],
-            patch={
-                "lastSyncCompletedAt": datetime.now(timezone.utc).isoformat(),
-                "lastSyncStatus": "done",
-                "lastSyncError": "",
-                "lastSyncedCommit": synced_commit,
-                "currentCloneCommit": synced_commit,
-            },
+            patch=status_patch,
         )
 
     async def execute_rebuild(self, *, job: Any, log: Callable[[str], None]) -> None:

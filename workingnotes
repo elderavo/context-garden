@@ -1,0 +1,23 @@
+1.  get the service git sync working, so that we're working off up-to-date code more often. 
+
+added auto-workspace provisioning - it was rotating secrets on sync. 
+
+  For context_garden:
+
+  - URL: http://10.0.132.100:7433/webhooks/gitlab/3a3242b2-8fcc-456e-953f-3cdf064c7240
+  - Secret: ea0a2bb18388d606ccfbf1ee130289fc2de797ca8edf3f19f9d97200234d97d8
+
+  For news:
+
+  - URL: http://10.0.132.100:7433/webhooks/gitlab/457e3531-9cb8-42ae-bad1-437b791835d4
+  - Secret: 080b2e27f532d4de7690395031c60d9b66cc807cbbdd8d8c740eea1cbf13fb62
+
+  For resim:
+
+  - URL: http://10.0.132.100:7433/webhooks/gitlab/65d0dc10-e356-44e2-a213-764ac7735c70
+  - Secret: 9c446a3f117e12e2058f5d3ecb0cdb7fd1d6b9db958e41c22af45426f88a429b
+
+
+add time to logging?
+
+should emit a "must read files"  

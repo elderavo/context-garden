@@ -153,6 +153,8 @@ Every push will now trigger a sync + reindex job visible in the Jobs tab.
 | `configure` | View or update embed/LLM config (`persist=true` saves to disk) |
 | `setup` | One-shot provider setup wizard |
 
+Agent guidance: see [AGENTS_CONTEXT_GARDEN_BEST_PRACTICES.md](AGENTS_CONTEXT_GARDEN_BEST_PRACTICES.md).
+
 ### Querying
 
 ```

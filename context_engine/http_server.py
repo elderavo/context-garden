@@ -205,8 +205,6 @@ async def _handle_workspace_sync(req: Request) -> JSONResponse:
     entry = next((w for w in entries if w["id"] == workspace_id), None)
     if not entry:
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
-    if entry.get("sourceType") != "gitlab":
-        return JSONResponse({"error": "Only GitLab workspaces support sync"}, status_code=400)
 
     job = req.app.state.job_queue.enqueue_sync(entry["id"], entry["name"], "manual")
     return JSONResponse({"jobId": job.id, "status": job.status}, status_code=202)
