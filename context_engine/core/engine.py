@@ -391,7 +391,6 @@ class KnowledgeGraphEngine:
             return self._retrieve_discovery(query=query, top_k=k, workspace=workspace)
 
         seed_notes: list[RetrievedNote] = []
-        expanded_notes: list[RetrievedNote] = []
 
         # Try vector retrieval first
         if self.index is not None:
@@ -405,15 +404,11 @@ class KnowledgeGraphEngine:
                     parsed_notes=self._parsed_notes,
                     similarity_top_k=k,
                 )
-                seed_notes, expanded_notes = retriever.retrieve(query, workspace=workspace)
+                seed_notes, _ = retriever.retrieve(query, workspace=workspace)
             except WorkspaceScopeViolationError as exc:
                 log.error("Vector retrieval violated workspace scope, falling back to keyword: %s", exc)
-                seed_notes = []
-                expanded_notes = []
             except Exception as exc:
                 log.warning("Vector retrieval failed, falling back to keyword: %s", exc)
-                seed_notes = []
-                expanded_notes = []
 
         # Fallback to keyword retrieval if vector produced no results
         if not seed_notes and self.keyword_retriever is not None:
@@ -422,22 +417,16 @@ class KnowledgeGraphEngine:
                 top_k=k,
                 workspace=workspace,
             )
-            expanded_notes = self._expand_via_graph(
-                seed_notes,
-                query=query,
-                workspace=workspace,
-            )
-            # No query embedding available in keyword-only path — triple scoring skipped
 
-        # Inter-seed paths: find connecting paths between top-3 seeds, merge path notes
+        # Inter-seed paths: structural signal connecting the top hits
         path_traces: list[dict] = []
+        path_notes: list[RetrievedNote] = []
         if len(seed_notes) >= 2 and self.graph_store is not None:
             path_traces, path_notes = self._find_inter_seed_paths(seed_notes[:3])
             seed_ids = {n.note_id for n in seed_notes}
-            for pn in path_notes:
-                if pn.note_id not in seed_ids:
-                    expanded_notes.append(pn)
-                    seed_ids.add(pn.note_id)
+            path_notes = [pn for pn in path_notes if pn.note_id not in seed_ids]
+
+        expanded_notes = path_notes
 
         # Format + synthesize
         from .synthesizer import format_context, synthesize
