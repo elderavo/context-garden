@@ -52,28 +52,32 @@ services:
 
 If your GitLab runs on a non-standard SSH port (e.g. 2222), add `-p 2222` to the SSH command.
 
-### 2. Build and start
+### 2. Pull and start
 
 ```bash
-sudo docker compose build context-garden
+sudo docker compose pull context-garden
 sudo docker compose up -d context-garden
 ```
 
 The web UI is at **http://localhost:7433**.
 
-If you changed Python dependencies, the Dockerfile, or anything under `context_engine/`,
-rebuild before restarting:
+To pin a specific published version instead of `latest`, set `CONTEXT_GARDEN_TAG`
+in your shell or `.env` before starting:
 
 ```bash
-sudo docker compose build --no-cache context-garden
+export CONTEXT_GARDEN_TAG=0.1.0
+sudo docker compose pull context-garden
 sudo docker compose up -d context-garden
 ```
 
-To confirm the running image picked up the new code:
+To confirm the running image picked up the new version:
 
 ```bash
 sudo docker compose logs -f context-garden
 ```
+
+If you are developing locally and want to build from source instead of pulling GHCR,
+override the service with `build: .` in `docker-compose.override.yml`.
 
 ### 3. Configure providers
 
@@ -152,6 +156,7 @@ Every push will now trigger a sync + reindex job visible in the Jobs tab.
 | `unregister_workspace` | Remove a workspace and its indexed notes |
 | `configure` | View or update embed/LLM config (`persist=true` saves to disk) |
 | `setup` | One-shot provider setup wizard |
+| `lookup_note` | Resolve an exact source path, mirrored note path, or symbol to its mirrored note |
 
 Agent guidance: see [AGENTS_CONTEXT_GARDEN_BEST_PRACTICES.md](AGENTS_CONTEXT_GARDEN_BEST_PRACTICES.md).
 
@@ -217,8 +222,8 @@ Provider config (embed host, model, API keys) is managed via the Settings UI or 
 **llama.cpp embeddings not working**
 - Verify the OpenAI-compatible endpoint responds: `curl http://10.0.132.7:8080/v1/models`
 - Use an actual model ID exposed by that server, for example `nomic`
-- If you changed dependencies or provider code, rebuild the container:
-  `sudo docker compose build --no-cache context-garden && sudo docker compose up -d context-garden`
+- If a new image was published, pull and restart the container:
+  `sudo docker compose pull context-garden && sudo docker compose up -d context-garden`
 
 **Webhook not triggering sync**
 - Confirm the secret token in GitLab matches the one shown in the Workspaces tab
@@ -237,3 +242,25 @@ Provider config (embed host, model, API keys) is managed via the Settings UI or 
 **Settings not saving**
 - Ensure the `./data` volume directory is writable
 - Check logs: `sudo docker compose logs context-garden`
+
+## Publishing a new container version
+
+The repository publishes `ghcr.io/elderavo/context-garden`.
+
+- Push to `master` on the `github` remote to refresh the `latest` tag.
+- Create and push a Git tag like `v0.1.1` to publish immutable tags `0.1.1` and `0.1`.
+
+Example:
+
+```bash
+git tag v0.1.1
+git push github master
+git push github v0.1.1
+```
+
+After the GitHub Actions workflow completes, users can update with:
+
+```bash
+sudo docker compose pull context-garden
+sudo docker compose up -d context-garden
+```

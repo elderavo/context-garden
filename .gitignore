@@ -47,3 +47,6 @@ data/
 
 # Pytest
 .pytest_cache/
+
+# Local release notes
+GHCR_RELEASE.local.md
